@@ -22,6 +22,7 @@ namespace Optimizely.Performance.SQL.Rewriting
     public sealed class SqlRewriteRegistry
     {
         private readonly Dictionary<string, ApprovedStatement> _byFingerprint;
+        private readonly Dictionary<string, ApprovedStatement> _byProcedure;
         private readonly RewriteOptions _options;
         private readonly IRewriteObserver _observer;
 
@@ -33,6 +34,7 @@ namespace Optimizely.Performance.SQL.Rewriting
             _options = options ?? new RewriteOptions();
             _observer = observer;
             _byFingerprint = new Dictionary<string, ApprovedStatement>(StringComparer.OrdinalIgnoreCase);
+            _byProcedure = new Dictionary<string, ApprovedStatement>(StringComparer.OrdinalIgnoreCase);
 
             var statements = document?.Statements ?? Array.Empty<ApprovedStatement>();
 
@@ -40,6 +42,21 @@ namespace Optimizely.Performance.SQL.Rewriting
             {
                 if (statement == null)
                 {
+                    continue;
+                }
+
+                if (statement.Kind == RewriteKind.ProcedureRedirect)
+                {
+                    var redirect = statement.Procedure;
+
+                    if (redirect == null
+                        || string.IsNullOrEmpty(redirect.OriginalName)
+                        || string.IsNullOrEmpty(redirect.ReplacementName))
+                    {
+                        continue;
+                    }
+
+                    _byProcedure[DatabaseCapabilities.Normalize(redirect.OriginalName)] = statement;
                     continue;
                 }
 
@@ -59,11 +76,11 @@ namespace Optimizely.Performance.SQL.Rewriting
                 _byFingerprint[key] = statement;
             }
 
-            Count = _byFingerprint.Count;
+            Count = _byFingerprint.Count + _byProcedure.Count;
             ActiveCount = CountActive(statements, _options.Version);
         }
 
-        /// <summary>Number of entries loaded, regardless of status.</summary>
+        /// <summary>Number of entries loaded.</summary>
         public int Count { get; }
 
         /// <summary>Number of entries eligible to fire for the configured CMS version.</summary>
@@ -72,7 +89,37 @@ namespace Optimizely.Performance.SQL.Rewriting
         /// <summary>True when there is nothing to match, letting callers skip fingerprinting entirely.</summary>
         public bool IsEmpty
         {
-            get { return _byFingerprint.Count == 0; }
+            get { return _byFingerprint.Count == 0 && _byProcedure.Count == 0; }
+        }
+
+        /// <summary>True when no procedure redirects are configured, letting callers skip the lookup.</summary>
+        public bool HasProcedureRedirects
+        {
+            get { return _byProcedure.Count != 0; }
+        }
+
+        /// <summary>
+        /// Every procedure name the redirects reference, originals and replacements alike.
+        /// </summary>
+        /// <remarks>
+        /// Hand this to <see cref="SqlServerCapabilityProvider"/> at construction so the
+        /// probe fetches exactly these bodies and no others. Empty when nothing is under
+        /// redirect, which switches the procedure probe off entirely.
+        /// </remarks>
+        public IReadOnlyCollection<string> ProcedureNames
+        {
+            get
+            {
+                var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var statement in _byProcedure.Values)
+                {
+                    names.Add(statement.Procedure.OriginalName);
+                    names.Add(statement.Procedure.ReplacementName);
+                }
+
+                return names;
+            }
         }
 
         /// <summary>
@@ -139,6 +186,77 @@ namespace Optimizely.Performance.SQL.Rewriting
             }
 
             return Report(RewriteResult.Rewritten(statement, variant, sql), fingerprint, commandText);
+        }
+
+        /// <summary>
+        /// Decides whether a stored procedure call should be pointed at a versioned copy.
+        /// </summary>
+        /// <param name="procedureName">Procedure the command is about to execute.</param>
+        /// <param name="capabilities">Probed facts about the target database.</param>
+        /// <remarks>
+        /// Three things must hold before the call is redirected: the replacement must
+        /// actually exist in this database, the original must still hash to what the
+        /// replacement was written against, and the entry's own preconditions must be
+        /// satisfied. Any of them failing leaves the shipped procedure to run.
+        /// </remarks>
+        public RewriteResult ResolveProcedure(string procedureName, DatabaseCapabilities capabilities)
+        {
+            if (!_options.Enabled || _byProcedure.Count == 0 || string.IsNullOrEmpty(procedureName))
+            {
+                return RewriteResult.NoChange;
+            }
+
+            ApprovedStatement statement;
+            if (!_byProcedure.TryGetValue(DatabaseCapabilities.Normalize(procedureName), out statement))
+            {
+                return RewriteResult.NoChange;
+            }
+
+            if (!statement.IsActiveFor(_options.Version))
+            {
+                return Report(RewriteResult.Suppressed(statement, RewriteOutcome.NotActive), null, procedureName);
+            }
+
+            var effective = capabilities ?? DatabaseCapabilities.Unknown;
+            var redirect = statement.Procedure;
+
+            // The redirect is only meaningful against a probed database: without knowing
+            // what is deployed we cannot tell a missing replacement from a present one.
+            if (!effective.IsProbed || !effective.HasProcedure(redirect.ReplacementName))
+            {
+                return Report(
+                    RewriteResult.Suppressed(statement, RewriteOutcome.ReplacementProcedureMissing),
+                    null,
+                    procedureName);
+            }
+
+            // A hash is required. Without one we cannot show the original still matches
+            // what the replacement was written against, so we do not redirect.
+            if (!effective.ProcedureBodyMatches(redirect.OriginalName, redirect.OriginalBodyHash))
+            {
+                return Report(
+                    RewriteResult.Suppressed(statement, RewriteOutcome.OriginalProcedureDrifted),
+                    null,
+                    procedureName);
+            }
+
+            if (!effective.Satisfies(statement.Preconditions))
+            {
+                return Report(
+                    RewriteResult.Suppressed(statement, RewriteOutcome.PreconditionsNotMet),
+                    null,
+                    procedureName);
+            }
+
+            if (_options.ShadowMode)
+            {
+                return Report(RewriteResult.Suppressed(statement, RewriteOutcome.Shadowed), null, procedureName);
+            }
+
+            return Report(
+                RewriteResult.Redirected(statement, redirect.ReplacementName),
+                null,
+                procedureName);
         }
 
         /// <summary>

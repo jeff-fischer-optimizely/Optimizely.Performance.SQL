@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net6.0;net8.0</TargetFrameworks>
+    <RootNamespace>Optimizely.Performance.SQL.V12</RootNamespace>
+    <AssemblyName>Optimizely.Performance.SQL.V12</AssemblyName>
+    <PackageId>Optimizely.Performance.SQL.V12</PackageId>
+    <Description>Optimizely CMS 12 adapter for the approved-SQL rewrite shim. Subscribes to the Microsoft.Data.SqlClient diagnostic source and substitutes approved statement text immediately before execution.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Optimizely.Performance.SQL.Core\Optimizely.Performance.SQL.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Deliberately no Microsoft.Data.SqlClient reference. The diagnostic payload's
+      Command is reached as System.Data.Common.DbCommand, so this adapter is not
+      coupled to any particular SqlClient version the site happens to resolve.
+    -->
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="6.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="6.0.0" />
+  </ItemGroup>
+
+</Project>

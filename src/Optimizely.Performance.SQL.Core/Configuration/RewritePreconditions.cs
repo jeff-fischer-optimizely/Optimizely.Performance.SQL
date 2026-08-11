@@ -38,6 +38,20 @@ namespace Optimizely.Performance.SQL.Configuration
         public int? MinimumSqlServerMajorVersion { get; set; }
 
         /// <summary>
+        /// Minimum database compatibility level, e.g. 150 for SQL Server 2019 behaviour.
+        /// </summary>
+        /// <remarks>
+        /// Nearly always the right gate in preference to
+        /// <see cref="MinimumSqlServerMajorVersion"/>. Sampling the estate found production
+        /// databases pinned to compatibility level 110 on a current Azure SQL engine: the
+        /// product version says 2012-and-later features are available, while the optimiser
+        /// is still generating 2012-era plans. Any rewrite that depends on optimiser
+        /// behaviour rather than on syntax availability must gate here.
+        /// </remarks>
+        [JsonPropertyName("minimumCompatibilityLevel")]
+        public int? MinimumCompatibilityLevel { get; set; }
+
+        /// <summary>
         /// Indexes that must exist for the rewrite to be a win rather than a regression.
         /// Names are matched against <c>sys.indexes</c>. A rewrite whose required index is
         /// missing is skipped, so shipping the rewrite before the index is deployed is safe.
@@ -54,6 +68,7 @@ namespace Optimizely.Performance.SQL.Configuration
                 return !RequiresCaseInsensitiveCollation
                     && !RequiresAccentInsensitiveCollation
                     && !MinimumSqlServerMajorVersion.HasValue
+                    && !MinimumCompatibilityLevel.HasValue
                     && (RequiredIndexes == null || RequiredIndexes.Length == 0);
             }
         }

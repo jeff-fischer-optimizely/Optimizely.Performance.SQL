@@ -3,10 +3,18 @@ using System.Text.Json.Serialization;
 namespace Optimizely.Performance.SQL.Configuration
 {
     /// <summary>
-    /// A single reviewed statement rewrite: the original text as the CMS emits it, the
-    /// approved replacement, the evidence behind it, and the sign-off that authorises
-    /// the shim to substitute one for the other at runtime.
+    /// A single reviewed rewrite: the original as the CMS emits it, the approved
+    /// replacement, and the server-side facts that must hold before the substitution is
+    /// applied.
     /// </summary>
+    /// <remarks>
+    /// Approval happens offline, in the markdown record under <c>approvals/</c>, and is
+    /// projected into configuration by the sync tool. Everything present here is therefore
+    /// approved by construction: there is no approval state to evaluate at runtime and no
+    /// code path that could execute an unapproved statement. The sign-off fields below are
+    /// inert provenance, carried so that support can trace a live rewrite back to the
+    /// record that authorised it.
+    /// </remarks>
     public sealed class ApprovedStatement
     {
         /// <summary>
@@ -21,10 +29,15 @@ namespace Optimizely.Performance.SQL.Configuration
         [JsonPropertyName("title")]
         public string Title { get; set; }
 
+        /// <summary>Whether this entry replaces statement text or redirects a procedure call.</summary>
+        [JsonPropertyName("kind")]
+        public RewriteKind Kind { get; set; } = RewriteKind.StatementRewrite;
+
         /// <summary>
-        /// Normalized fingerprint of <see cref="OriginalSql"/>. This is the runtime
-        /// lookup key. It is derived, not hand-written: the sync tool recomputes it from
-        /// <see cref="OriginalSql"/> and fails the build when the two disagree.
+        /// Normalized fingerprint of <see cref="OriginalSql"/>, and the runtime lookup key
+        /// for <see cref="RewriteKind.StatementRewrite"/> entries. It is derived, not
+        /// hand-written: the sync tool recomputes it from <see cref="OriginalSql"/> and
+        /// fails the build when the two disagree.
         /// </summary>
         [JsonPropertyName("fingerprint")]
         public string Fingerprint { get; set; }
@@ -33,22 +46,17 @@ namespace Optimizely.Performance.SQL.Configuration
         [JsonPropertyName("appliesTo")]
         public CmsVersion AppliesTo { get; set; } = CmsVersion.All;
 
-        /// <summary>Approval state. Anything other than <see cref="ApprovalStatus.Approved"/> is inert.</summary>
-        [JsonPropertyName("status")]
-        public ApprovalStatus Status { get; set; } = ApprovalStatus.Draft;
-
-        /// <summary>Who signed off. Required by the CI gate when <see cref="Status"/> is Approved.</summary>
+        /// <summary>Who signed off. Provenance only; never evaluated.</summary>
         [JsonPropertyName("approvedBy")]
         public string ApprovedBy { get; set; }
 
-        /// <summary>ISO-8601 sign-off date. Required by the CI gate when Approved.</summary>
+        /// <summary>ISO-8601 sign-off date. Provenance only; never evaluated.</summary>
         [JsonPropertyName("approvedOn")]
         public string ApprovedOn { get; set; }
 
         /// <summary>
         /// Repo-relative path to the markdown approval record, e.g.
-        /// <c>approvals/OPT-0007-content-children.md</c>. The gate verifies the file exists
-        /// and that its front matter agrees with this entry.
+        /// <c>approvals/OPT-0007-content-children.md</c>. Provenance only; never evaluated.
         /// </summary>
         [JsonPropertyName("approvalDocument")]
         public string ApprovalDocument { get; set; }
@@ -70,6 +78,13 @@ namespace Optimizely.Performance.SQL.Configuration
         /// </summary>
         [JsonPropertyName("variants")]
         public StatementVariant[] Variants { get; set; }
+
+        /// <summary>
+        /// Procedure redirect details. Required when <see cref="Kind"/> is
+        /// <see cref="RewriteKind.ProcedureRedirect"/>, ignored otherwise.
+        /// </summary>
+        [JsonPropertyName("procedure")]
+        public ProcedureRedirect Procedure { get; set; }
 
         /// <summary>Server-side facts that must hold before any replacement is applied.</summary>
         [JsonPropertyName("preconditions")]
@@ -96,9 +111,7 @@ namespace Optimizely.Performance.SQL.Configuration
         /// <summary>True when this entry is eligible to run against the given CMS version.</summary>
         public bool IsActiveFor(CmsVersion version)
         {
-            return Enabled
-                && Status == ApprovalStatus.Approved
-                && (AppliesTo & version) != CmsVersion.None;
+            return Enabled && (AppliesTo & version) != CmsVersion.None;
         }
     }
 }

@@ -20,9 +20,11 @@ namespace Optimizely.Performance.SQL.Ado
     /// reads <c>CommandText</c> back for its own logging.
     /// </para>
     /// <para>
-    /// Only <see cref="CommandType.Text"/> commands are considered. For a stored
-    /// procedure the text is a procedure name, not a statement, and rewriting it would
-    /// be meaningless.
+    /// Both command types are handled, differently. For <see cref="CommandType.Text"/>
+    /// the statement is fingerprinted and its text replaced. For
+    /// <see cref="CommandType.StoredProcedure"/> the text is a procedure name, so the
+    /// name is swapped for a versioned copy carrying the optimised body; the shipped
+    /// procedure is never altered and the call itself is unchanged.
     /// </para>
     /// </remarks>
     public class RewritingDbCommand : DbCommand
@@ -177,7 +179,18 @@ namespace Optimizely.Performance.SQL.Ado
         /// </summary>
         private RewriteScope BeginRewrite()
         {
-            if (_context.IsInert || _inner.CommandType != CommandType.Text)
+            var commandType = _inner.CommandType;
+
+            if (_context.IsInert
+                || (commandType != CommandType.Text && commandType != CommandType.StoredProcedure))
+            {
+                return RewriteScope.None;
+            }
+
+            // Procedure redirects are rare and are configured per deployment. Skip the
+            // probe entirely when none are loaded, so a sproc-heavy stack such as CMS 11
+            // pays nothing for the feature being present.
+            if (commandType == CommandType.StoredProcedure && !_context.Registry.HasProcedureRedirects)
             {
                 return RewriteScope.None;
             }
@@ -188,7 +201,9 @@ namespace Optimizely.Performance.SQL.Ado
                     ? _context.CapabilityProvider.GetCapabilities(_inner.Connection)
                     : DatabaseCapabilities.Unknown;
 
-                var result = _context.Registry.Resolve(_inner.CommandText, _inner.Parameters, capabilities);
+                var result = commandType == CommandType.StoredProcedure
+                    ? _context.Registry.ResolveProcedure(_inner.CommandText, capabilities)
+                    : _context.Registry.Resolve(_inner.CommandText, _inner.Parameters, capabilities);
 
                 if (!result.ShouldReplace)
                 {

@@ -4,12 +4,14 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
+using System.Text;
+using Optimizely.Performance.SQL.Fingerprinting;
 
 namespace Optimizely.Performance.SQL.Rewriting
 {
     /// <summary>
-    /// Probes collation, product version and index presence once per database and caches
-    /// the answer for the process lifetime.
+    /// Probes collation, product version, compatibility level, index presence and
+    /// procedure bodies once per database and caches the answer for the process lifetime.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -25,20 +27,65 @@ namespace Optimizely.Performance.SQL.Rewriting
     /// </remarks>
     public sealed class SqlServerCapabilityProvider : IDatabaseCapabilityProvider
     {
+        // Compatibility level is read alongside the product version because the two
+        // routinely disagree: sampling the estate found production databases at level 110
+        // on a 12.x Azure SQL engine. The product version alone would let a rewrite that
+        // needs a modern optimiser through onto a 2012-era one.
         private const string ProbeSql = @"
 SELECT
     CONVERT(nvarchar(256), DATABASEPROPERTYEX(DB_NAME(), 'Collation')),
-    CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion'));
+    CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')),
+    CONVERT(int, DATABASEPROPERTYEX(DB_NAME(), 'CompatibilityLevel'));
+
 SELECT name FROM sys.indexes WHERE name IS NOT NULL;";
 
         private readonly ConcurrentDictionary<string, DatabaseCapabilities> _cache =
             new ConcurrentDictionary<string, DatabaseCapabilities>(StringComparer.OrdinalIgnoreCase);
 
+        private readonly string[] _proceduresOfInterest;
         private readonly int _timeoutSeconds;
 
-        public SqlServerCapabilityProvider(int timeoutSeconds = 5)
+        /// <param name="proceduresOfInterest">
+        /// Procedures whose bodies should be read and hashed: the originals and
+        /// replacements named by the loaded procedure redirects. Pass null or empty when
+        /// there are none, and no procedure metadata is fetched at all.
+        /// </param>
+        /// <param name="timeoutSeconds">Probe command timeout.</param>
+        /// <remarks>
+        /// The set is passed in rather than discovered because an EPiServer database holds
+        /// several hundred procedures and their bodies run to megabytes. Fetching only the
+        /// handful under redirect keeps the probe to one small round trip.
+        /// </remarks>
+        public SqlServerCapabilityProvider(
+            IEnumerable<string> proceduresOfInterest = null,
+            int timeoutSeconds = 5)
         {
             _timeoutSeconds = timeoutSeconds;
+            _proceduresOfInterest = Distinct(proceduresOfInterest);
+        }
+
+        private static string[] Distinct(IEnumerable<string> names)
+        {
+            if (names == null)
+            {
+                return Array.Empty<string>();
+            }
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var name in names)
+            {
+                var normalized = DatabaseCapabilities.Normalize(name);
+
+                if (normalized.Length != 0)
+                {
+                    seen.Add(normalized);
+                }
+            }
+
+            var result = new string[seen.Count];
+            seen.CopyTo(result);
+            return result;
         }
 
         public DatabaseCapabilities GetCapabilities(DbConnection connection)
@@ -88,6 +135,7 @@ SELECT name FROM sys.indexes WHERE name IS NOT NULL;";
 
                     var collation = string.Empty;
                     var majorVersion = 0;
+                    var compatibilityLevel = 0;
                     var indexes = new List<string>();
 
                     using (var reader = command.ExecuteReader())
@@ -96,6 +144,7 @@ SELECT name FROM sys.indexes WHERE name IS NOT NULL;";
                         {
                             collation = reader.IsDBNull(0) ? string.Empty : reader.GetString(0);
                             majorVersion = ParseMajorVersion(reader.IsDBNull(1) ? null : reader.GetString(1));
+                            compatibilityLevel = reader.IsDBNull(2) ? 0 : reader.GetInt32(2);
                         }
 
                         if (reader.NextResult())
@@ -110,7 +159,17 @@ SELECT name FROM sys.indexes WHERE name IS NOT NULL;";
                         }
                     }
 
-                    return new DatabaseCapabilities(collation, majorVersion, indexes);
+                    // Separate round trip, separately guarded. If this fails the database
+                    // still gets its collation- and version-gated rewrites; only the
+                    // procedure redirects stand down.
+                    var procedures = ProbeProcedures(connection);
+
+                    return new DatabaseCapabilities(
+                        collation,
+                        majorVersion,
+                        compatibilityLevel,
+                        indexes,
+                        procedures);
                 }
             }
             catch
@@ -118,6 +177,84 @@ SELECT name FROM sys.indexes WHERE name IS NOT NULL;";
                 // An unprobeable database simply gets no conditional rewrites.
                 return DatabaseCapabilities.Unknown;
             }
+        }
+
+        /// <summary>
+        /// Reads the bodies of the procedures under redirect and hashes them client-side.
+        /// Returns an empty set when nothing is under redirect or the read fails.
+        /// </summary>
+        private List<KeyValuePair<string, string>> ProbeProcedures(DbConnection connection)
+        {
+            var result = new List<KeyValuePair<string, string>>();
+
+            if (_proceduresOfInterest.Length == 0)
+            {
+                return result;
+            }
+
+            try
+            {
+                using (var command = connection.CreateCommand())
+                {
+                    var sql = new StringBuilder(
+                        "SELECT o.name, m.definition FROM sys.sql_modules AS m" +
+                        " JOIN sys.objects AS o ON o.object_id = m.object_id" +
+                        " WHERE o.type = 'P' AND o.name IN (");
+
+                    for (var i = 0; i < _proceduresOfInterest.Length; i++)
+                    {
+                        if (i > 0)
+                        {
+                            sql.Append(',');
+                        }
+
+                        var name = "@p" + i.ToString(CultureInfo.InvariantCulture);
+                        sql.Append(name);
+
+                        // Parameterised rather than interpolated. The names come from our
+                        // own configuration, but a probe is no place to build SQL by
+                        // concatenation.
+                        var parameter = command.CreateParameter();
+                        parameter.ParameterName = name;
+                        parameter.DbType = DbType.String;
+                        parameter.Size = 128;
+                        parameter.Value = _proceduresOfInterest[i];
+                        command.Parameters.Add(parameter);
+                    }
+
+                    sql.Append(')');
+
+                    command.CommandText = sql.ToString();
+                    command.CommandType = CommandType.Text;
+                    command.CommandTimeout = _timeoutSeconds;
+
+                    using (var reader = command.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            if (reader.IsDBNull(0))
+                            {
+                                continue;
+                            }
+
+                            var name = reader.GetString(0);
+                            var definition = reader.IsDBNull(1) ? null : reader.GetString(1);
+
+                            result.Add(new KeyValuePair<string, string>(
+                                name,
+                                ModuleHash.Compute(definition)));
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Encrypted or unreadable modules leave the redirect inactive, which is
+                // the safe direction.
+                result.Clear();
+            }
+
+            return result;
         }
 
         private static int ParseMajorVersion(string productVersion)

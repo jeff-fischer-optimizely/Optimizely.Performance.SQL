@@ -39,10 +39,19 @@ namespace Optimizely.Performance.SQL.Rewriting
         /// <summary>Why this result came out the way it did.</summary>
         public RewriteOutcome Reason { get; }
 
-        /// <summary>True when the caller should swap in <see cref="Sql"/>.</summary>
+        /// <summary>
+        /// True when the caller should swap in <see cref="Sql"/>. Covers both statement
+        /// text and procedure names: for a redirect, <see cref="Sql"/> is the replacement
+        /// procedure name, which is what <c>CommandText</c> holds on a
+        /// <c>CommandType.StoredProcedure</c> command.
+        /// </summary>
         public bool ShouldReplace
         {
-            get { return Reason == RewriteOutcome.Rewritten && Sql != null; }
+            get
+            {
+                return Sql != null
+                    && (Reason == RewriteOutcome.Rewritten || Reason == RewriteOutcome.ProcedureRedirected);
+            }
         }
 
         /// <summary>Parameters to remove from the command before execution.</summary>
@@ -72,6 +81,11 @@ namespace Optimizely.Performance.SQL.Rewriting
             return new RewriteResult(statement, variant, sql, RewriteOutcome.Rewritten);
         }
 
+        internal static RewriteResult Redirected(ApprovedStatement statement, string replacementProcedure)
+        {
+            return new RewriteResult(statement, null, replacementProcedure, RewriteOutcome.ProcedureRedirected);
+        }
+
         internal static RewriteResult Suppressed(ApprovedStatement statement, RewriteOutcome reason)
         {
             return new RewriteResult(statement, null, null, reason);
@@ -90,7 +104,7 @@ namespace Optimizely.Performance.SQL.Rewriting
         /// <summary>Matched and replaced.</summary>
         Rewritten = 1,
 
-        /// <summary>Matched, but the entry is not Approved, is disabled, or targets another CMS version.</summary>
+        /// <summary>Matched, but the entry is disabled or targets another CMS version.</summary>
         NotActive = 2,
 
         /// <summary>Matched, but the database does not satisfy the entry's preconditions.</summary>
@@ -103,6 +117,22 @@ namespace Optimizely.Performance.SQL.Rewriting
         Shadowed = 5,
 
         /// <summary>The shim is switched off.</summary>
-        Disabled = 6
+        Disabled = 6,
+
+        /// <summary>Matched, and the call was pointed at the versioned replacement procedure.</summary>
+        ProcedureRedirected = 7,
+
+        /// <summary>
+        /// Matched, but the replacement procedure is not deployed in this database. The
+        /// expected state everywhere the installer has not run, and not an error.
+        /// </summary>
+        ReplacementProcedureMissing = 8,
+
+        /// <summary>
+        /// Matched, but the shipped procedure no longer hashes to what the replacement was
+        /// written against — a CMS upgrade has changed it. Worth alerting on: the
+        /// replacement needs re-deriving against the new body.
+        /// </summary>
+        OriginalProcedureDrifted = 9
     }
 }

@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <RootNamespace>Optimizely.Performance.SQL</RootNamespace>
+    <AssemblyName>Optimizely.Performance.SQL.Core</AssemblyName>
+    <PackageId>Optimizely.Performance.SQL.Core</PackageId>
+    <Description>Version-agnostic core for the Optimizely CMS approved-SQL rewrite shim: fingerprinting, approval configuration, variant selection and ADO.NET decorators.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+</Project>

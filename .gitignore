@@ -38,3 +38,7 @@ Thumbs.db
 ## Local overrides (never commit environment-specific rewrite config)
 config/*.local.json
 appsettings.*.local.json
+
+## Fleet survey output. Names customers, servers and their configuration
+## weaknesses, so it stays local and out of the repository.
+docs/survey/

@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Optimizely.Performance.SQL.Core/Optimizely.Performance.SQL.Core.csproj" />
+    <Project Path="src/Optimizely.Performance.SQL.V12/Optimizely.Performance.SQL.V12.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Optimizely.Performance.SQL.Core.Tests/Optimizely.Performance.SQL.Core.Tests.csproj" />
+    <Project Path="tests/Optimizely.Performance.SQL.Integration.Tests/Optimizely.Performance.SQL.Integration.Tests.csproj" />
+  </Folder>
+</Solution>

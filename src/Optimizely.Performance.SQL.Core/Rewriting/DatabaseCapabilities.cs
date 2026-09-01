@@ -21,6 +21,10 @@ namespace Optimizely.Performance.SQL.Rewriting
 
         private DatabaseCapabilities()
         {
+            // Empty rather than null: the collation-derived properties are public and
+            // Unknown is what every failed probe returns, so they must answer "no" rather
+            // than throw.
+            Collation = string.Empty;
             _indexes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             _procedureBodyHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             IsProbed = false;

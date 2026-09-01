@@ -197,8 +197,10 @@ namespace Optimizely.Performance.SQL.Ado
 
             try
             {
+                // The transaction goes with the connection: a probe issued outside the
+                // caller's pending transaction is rejected by the provider.
                 var capabilities = _context.Options.ProbeDatabaseCapabilities
-                    ? _context.CapabilityProvider.GetCapabilities(_inner.Connection)
+                    ? _context.CapabilityProvider.GetCapabilities(_inner.Connection, _inner.Transaction)
                     : DatabaseCapabilities.Unknown;
 
                 var result = commandType == CommandType.StoredProcedure
@@ -262,9 +264,8 @@ namespace Optimizely.Performance.SQL.Ado
             }
 
             /// <summary>
-            /// Strips parameters the replacement no longer declares. SQL Server rejects a
-            /// batch supplied with parameters it does not reference, so a variant that
-            /// removes a predicate must also remove that predicate's parameter.
+            /// Strips parameters the replacement no longer references, keeping the
+            /// <c>sp_executesql</c> signature aligned with the batch actually being run.
             /// </summary>
             private static List<KeyValuePair<int, DbParameter>> RemoveDroppedParameters(
                 DbCommand command,

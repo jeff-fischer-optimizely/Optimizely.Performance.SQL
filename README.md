@@ -4,8 +4,9 @@ A runtime SQL statement rewrite shim for Optimizely CMS 11 and 12. It recognises
 statement the CMS is about to execute and substitutes a performance-approved variant,
 without changing a line of application code — current or historical.
 
-> **Status: early. Not production-ready yet.** The core decision engine is written; the
-> hosting adapters, the approved-SQL corpus and the test suite are not. See
+> **Status: early. Not production-ready yet.** The core decision engine is written and
+> covered by tests, including an integration suite against a real SQL Server. The hosting
+> adapters and the approved-SQL corpus are not written. See
 > [What is not here yet](#what-is-not-here-yet) before you plan around this.
 
 ## Why
@@ -123,8 +124,10 @@ that database rather than just the redirects.
 ```
 
 Variants are evaluated in declaration order; the first whose conditions *all* hold wins.
-`dropsParameters` exists because SQL Server rejects a command carrying parameters the batch
-never declares, so the shim strips them before execution.
+`dropsParameters` strips parameters the chosen variant no longer references. This is a plan
+concern rather than a correctness one — `sp_executesql` accepts a declared parameter the
+batch never mentions — but leaving it declared keeps it in the signature, so the statement
+caches under a different key and stays exposed to sniffing on a value it no longer uses.
 
 ### Preconditions
 
@@ -204,10 +207,30 @@ is not coupled to whichever SqlClient a given site resolves.
 ## Building
 
 ```bash
-dotnet build src/Optimizely.Performance.SQL.Core/Optimizely.Performance.SQL.Core.csproj
+dotnet build Optimizely.Performance.SQL.slnx
+dotnet test  Optimizely.Performance.SQL.slnx
 ```
 
-There is no solution file yet; build the projects directly.
+## Testing
+
+```
+tests/Optimizely.Performance.SQL.Core.Tests/         210 tests, no database required
+tests/Optimizely.Performance.SQL.Integration.Tests/   35 tests, needs a SQL Server
+```
+
+The unit suite drives the ADO.NET decorators over a fake provider that records what it was
+actually asked to execute — the only place the substitution can be observed, since the
+scope restores the command before control returns to the caller.
+
+The integration suite builds two scratch databases on a real engine, one `_CI_AS` and one
+`_CS_AS`, and runs the same collation-gated rewrite against both. That pairing is the point:
+it shows the rewrite returning identical rows on the case-insensitive database, shows the
+same rewrite genuinely changing results on the case-sensitive one, and shows the shim
+standing down there. It also covers the procedure redirect end to end, including drift and
+a replacement that was never deployed.
+
+It targets a local default instance; override with `OPTIPERF_TEST_SQL`. With no server
+reachable the integration tests skip rather than fail.
 
 ## What is not here yet
 
@@ -219,7 +242,7 @@ Being explicit, because the core reads more finished than the product is:
   explaining the intended `DiagnosticListener` subscription. No source files.
 - **No CMS 11 adapter at all.** The likely hook is subclassing
   `SqlServerDataStoreProvider`; not yet decided or written.
-- **No tests, no solution file, no CI.**
+- **No CI.** The suites exist and pass; nothing runs them on push.
 - **`SqlServerCapabilityProvider` matches indexes by name only.** It reads `sys.indexes`
   and compares names. A precondition that really wants "an index leading on these key
   columns with these includes" needs `sys.index_columns`, which is not wired up. Index

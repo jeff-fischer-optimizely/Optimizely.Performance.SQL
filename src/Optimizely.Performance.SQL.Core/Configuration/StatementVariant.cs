@@ -35,9 +35,16 @@ namespace Optimizely.Performance.SQL.Configuration
 
         /// <summary>
         /// Parameters the original command supplies that this variant's SQL no longer
-        /// references. SQL Server rejects a command carrying parameters the batch never
-        /// declares, so the shim strips these from the command before execution.
+        /// references, stripped from the command before execution.
         /// </summary>
+        /// <remarks>
+        /// Not a correctness requirement: SqlClient sends a parameterised batch through
+        /// <c>sp_executesql</c>, which tolerates a declared parameter the batch never
+        /// mentions. It is about the plan. Leaving the parameter declared keeps it in the
+        /// <c>sp_executesql</c> signature, so the rewritten statement caches under a
+        /// different key than the same text without it and is exposed to sniffing on a
+        /// value it no longer uses.
+        /// </remarks>
         [JsonPropertyName("dropsParameters")]
         public string[] DropsParameters { get; set; }
     }

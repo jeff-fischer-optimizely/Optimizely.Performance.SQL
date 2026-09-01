@@ -88,7 +88,7 @@ SELECT name FROM sys.indexes WHERE name IS NOT NULL;";
             return result;
         }
 
-        public DatabaseCapabilities GetCapabilities(DbConnection connection)
+        public DatabaseCapabilities GetCapabilities(DbConnection connection, DbTransaction transaction = null)
         {
             if (connection == null)
             {
@@ -115,7 +115,7 @@ SELECT name FROM sys.indexes WHERE name IS NOT NULL;";
                 return DatabaseCapabilities.Unknown;
             }
 
-            var probed = Probe(connection);
+            var probed = Probe(connection, transaction);
 
             // Cache failures too, so a database that cannot answer is asked only once.
             _cache.TryAdd(key, probed);
@@ -123,7 +123,7 @@ SELECT name FROM sys.indexes WHERE name IS NOT NULL;";
             return probed;
         }
 
-        private DatabaseCapabilities Probe(DbConnection connection)
+        private DatabaseCapabilities Probe(DbConnection connection, DbTransaction transaction)
         {
             try
             {
@@ -132,6 +132,13 @@ SELECT name FROM sys.indexes WHERE name IS NOT NULL;";
                     command.CommandText = ProbeSql;
                     command.CommandType = CommandType.Text;
                     command.CommandTimeout = _timeoutSeconds;
+
+                    // Enlist in whatever the intercepted command is already inside.
+                    // SqlClient rejects an unenlisted command on a connection holding a
+                    // pending local transaction, and since failures are cached, probing
+                    // for the first time inside a transaction would otherwise disable
+                    // every conditional rewrite on this database for the process lifetime.
+                    command.Transaction = transaction;
 
                     var collation = string.Empty;
                     var majorVersion = 0;
@@ -162,7 +169,7 @@ SELECT name FROM sys.indexes WHERE name IS NOT NULL;";
                     // Separate round trip, separately guarded. If this fails the database
                     // still gets its collation- and version-gated rewrites; only the
                     // procedure redirects stand down.
-                    var procedures = ProbeProcedures(connection);
+                    var procedures = ProbeProcedures(connection, transaction);
 
                     return new DatabaseCapabilities(
                         collation,
@@ -183,7 +190,7 @@ SELECT name FROM sys.indexes WHERE name IS NOT NULL;";
         /// Reads the bodies of the procedures under redirect and hashes them client-side.
         /// Returns an empty set when nothing is under redirect or the read fails.
         /// </summary>
-        private List<KeyValuePair<string, string>> ProbeProcedures(DbConnection connection)
+        private List<KeyValuePair<string, string>> ProbeProcedures(DbConnection connection, DbTransaction transaction)
         {
             var result = new List<KeyValuePair<string, string>>();
 
@@ -227,6 +234,7 @@ SELECT name FROM sys.indexes WHERE name IS NOT NULL;";
                     command.CommandText = sql.ToString();
                     command.CommandType = CommandType.Text;
                     command.CommandTimeout = _timeoutSeconds;
+                    command.Transaction = transaction;
 
                     using (var reader = command.ExecuteReader())
                     {

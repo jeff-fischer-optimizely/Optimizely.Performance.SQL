@@ -13,7 +13,14 @@ namespace Optimizely.Performance.SQL.Rewriting
         /// string, and return <see cref="DatabaseCapabilities.Unknown"/> rather than
         /// throwing or blocking if the answer is not yet available.
         /// </summary>
-        DatabaseCapabilities GetCapabilities(DbConnection connection);
+        /// <param name="connection">The connection the intercepted command will run on.</param>
+        /// <param name="transaction">
+        /// The transaction that command is enlisted in, or null. It must be passed on to
+        /// any command the probe issues: SqlClient refuses to execute an unenlisted
+        /// command on a connection with a pending local transaction, and the resulting
+        /// failure would be cached as "nothing is known about this database".
+        /// </param>
+        DatabaseCapabilities GetCapabilities(DbConnection connection, DbTransaction transaction = null);
     }
 
     /// <summary>
@@ -28,7 +35,7 @@ namespace Optimizely.Performance.SQL.Rewriting
         {
         }
 
-        public DatabaseCapabilities GetCapabilities(DbConnection connection)
+        public DatabaseCapabilities GetCapabilities(DbConnection connection, DbTransaction transaction = null)
         {
             return DatabaseCapabilities.Unknown;
         }

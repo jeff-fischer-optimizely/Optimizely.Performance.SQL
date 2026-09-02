@@ -42,3 +42,10 @@ appsettings.*.local.json
 ## Fleet survey output. Names customers, servers and their configuration
 ## weaknesses, so it stays local and out of the repository.
 docs/survey/
+
+## Scratch: extracted vendor procedure sources and survey joins used while
+## authoring the rewrite catalogue. Derived from customer data; regenerate
+## locally rather than committing.
+.procsrc/
+.procs.json
+.matched.json

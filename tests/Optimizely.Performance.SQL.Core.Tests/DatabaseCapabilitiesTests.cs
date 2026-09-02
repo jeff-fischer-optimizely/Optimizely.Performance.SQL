@@ -86,6 +86,85 @@ namespace Optimizely.Performance.SQL.Tests
             Assert.Equal(expected, Build.Capabilities(compatibilityLevel: actual).Satisfies(preconditions));
         }
 
+        /// <summary>
+        /// A replacement that calls another replacement is only safe once both are deployed.
+        /// Without this gate the half-deployed database passes every check and then throws at
+        /// execution, which is the one outcome the whole design exists to rule out.
+        /// </summary>
+        [Fact]
+        public void A_required_procedure_that_is_not_deployed_fails_the_preconditions()
+        {
+            var preconditions = new RewritePreconditions
+            {
+                RequiredProcedures = new[] { "ecf_CatalogEntry_Components_optiperf_v1" }
+            };
+
+            var without = Build.Capabilities(procedures: Build.Procedures(("ecf_CatalogEntry_List", "hash")));
+            var with = Build.Capabilities(procedures: Build.Procedures(
+                ("ecf_CatalogEntry_List", "hash"),
+                ("ecf_CatalogEntry_Components_optiperf_v1", "hash")));
+
+            Assert.False(without.Satisfies(preconditions));
+            Assert.True(with.Satisfies(preconditions));
+        }
+
+        /// <summary>
+        /// Discriminating on a callee's body, for the case where the procedure being replaced
+        /// is identical across product versions but what it calls is not.
+        /// </summary>
+        [Fact]
+        public void A_required_procedure_body_must_hash_to_the_expected_value()
+        {
+            var preconditions = new RewritePreconditions
+            {
+                RequiredProcedureBodies = new Dictionary<string, string>
+                {
+                    { "ecf_CatalogEntry_Components", "commerce-15-hash" }
+                }
+            };
+
+            Assert.True(Build.Capabilities(procedures: Build.Procedures(
+                ("ecf_CatalogEntry_Components", "commerce-15-hash"))).Satisfies(preconditions));
+
+            Assert.False(Build.Capabilities(procedures: Build.Procedures(
+                ("ecf_CatalogEntry_Components", "commerce-14-hash"))).Satisfies(preconditions));
+
+            Assert.False(Build.Capabilities(procedures: Build.Procedures(
+                ("something_else", "commerce-15-hash"))).Satisfies(preconditions));
+        }
+
+        [Theory]
+        [InlineData(140, 130, true)]
+        [InlineData(140, 140, true)]
+        [InlineData(140, 150, false)]
+        [InlineData(140, 170, false)]
+        public void Compatibility_level_ceiling_is_inclusive(int allowed, int actual, bool expected)
+        {
+            var preconditions = new RewritePreconditions { MaximumCompatibilityLevel = allowed };
+
+            Assert.Equal(expected, Build.Capabilities(compatibilityLevel: actual).Satisfies(preconditions));
+        }
+
+        /// <summary>
+        /// The table-variable rewrites are bounded on both sides, and the point of the ceiling
+        /// is that an estate upgrading itself out of the rewrite needs no configuration change.
+        /// </summary>
+        [Theory]
+        [InlineData(100, false)]
+        [InlineData(110, true)]
+        [InlineData(140, true)]
+        [InlineData(150, false)]
+        public void A_window_of_compatibility_levels_can_be_expressed(int actual, bool expected)
+        {
+            var preconditions = new RewritePreconditions
+            {
+                MinimumCompatibilityLevel = 110,
+                MaximumCompatibilityLevel = 140
+            };
+
+            Assert.Equal(expected, Build.Capabilities(compatibilityLevel: actual).Satisfies(preconditions));
+        }
+
         [Fact]
         public void Compatibility_level_is_checked_independently_of_product_version()
         {

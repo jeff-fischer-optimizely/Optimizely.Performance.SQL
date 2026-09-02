@@ -91,6 +91,32 @@ namespace Optimizely.Performance.SQL.Configuration
         public RewritePreconditions Preconditions { get; set; }
 
         /// <summary>
+        /// How much could go wrong if this rewrite is applied somewhere nobody tested it.
+        /// Descriptive; never evaluated. See <see cref="RewriteRisk"/>.
+        /// </summary>
+        [JsonPropertyName("risk")]
+        public RewriteRisk Risk { get; set; } = RewriteRisk.Unclassified;
+
+        /// <summary>
+        /// Why this entry sits in its tier — the specific thing that could differ, or the
+        /// specific fact that rules it out.
+        /// </summary>
+        /// <remarks>
+        /// A tier without a reason is an assertion, and assertions do not survive review.
+        /// This is the field that makes the classification auditable a year from now, when
+        /// whoever assigned it has forgotten what they were looking at.
+        /// </remarks>
+        [JsonPropertyName("riskRationale")]
+        public string RiskRationale { get; set; }
+
+        /// <summary>
+        /// How much database work this statement accounts for across the surveyed fleet.
+        /// Provenance only; never evaluated. See <see cref="RewriteImpact"/>.
+        /// </summary>
+        [JsonPropertyName("impact")]
+        public RewriteImpact Impact { get; set; }
+
+        /// <summary>
         /// Indexes recommended alongside this rewrite, as executable DDL. These are
         /// documentation and deployment input; the shim never runs DDL itself.
         /// </summary>

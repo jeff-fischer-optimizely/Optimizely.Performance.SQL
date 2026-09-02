@@ -22,7 +22,26 @@ namespace Optimizely.Performance.SQL.Rewriting
     public sealed class SqlRewriteRegistry
     {
         private readonly Dictionary<string, ApprovedStatement> _byFingerprint;
-        private readonly Dictionary<string, ApprovedStatement> _byProcedure;
+
+        /// <summary>
+        /// Redirects grouped by the procedure they replace, in configuration order.
+        /// </summary>
+        /// <remarks>
+        /// A list rather than a single entry because one procedure name routinely has more
+        /// than one approved replacement. Two reasons, both structural rather than
+        /// incidental. CMS 11 and CMS 12 ship different bodies under the same name, so each
+        /// needs its own replacement and its own drift hash. And a rewrite whose benefit
+        /// depends on the optimiser can need one body below a compatibility level and a
+        /// different one above it -- the table variable entries pair a recompile-hinted copy
+        /// capped at level 140 with an unhinted copy from 150 up.
+        ///
+        /// Candidates are tried in the order the configuration lists them and the first
+        /// whose gates all pass wins, so overlapping entries resolve by precedence rather
+        /// than by error. Entries intended to be mutually exclusive should still be written
+        /// with disjoint preconditions; the ordering is a tie-break, not a substitute for
+        /// saying which database each one is for.
+        /// </remarks>
+        private readonly Dictionary<string, List<ApprovedStatement>> _byProcedure;
         private readonly RewriteOptions _options;
         private readonly IRewriteObserver _observer;
 
@@ -34,7 +53,7 @@ namespace Optimizely.Performance.SQL.Rewriting
             _options = options ?? new RewriteOptions();
             _observer = observer;
             _byFingerprint = new Dictionary<string, ApprovedStatement>(StringComparer.OrdinalIgnoreCase);
-            _byProcedure = new Dictionary<string, ApprovedStatement>(StringComparer.OrdinalIgnoreCase);
+            _byProcedure = new Dictionary<string, List<ApprovedStatement>>(StringComparer.OrdinalIgnoreCase);
 
             var statements = document?.Statements ?? Array.Empty<ApprovedStatement>();
 
@@ -56,7 +75,16 @@ namespace Optimizely.Performance.SQL.Rewriting
                         continue;
                     }
 
-                    _byProcedure[DatabaseCapabilities.Normalize(redirect.OriginalName)] = statement;
+                    var name = DatabaseCapabilities.Normalize(redirect.OriginalName);
+
+                    List<ApprovedStatement> candidates;
+                    if (!_byProcedure.TryGetValue(name, out candidates))
+                    {
+                        candidates = new List<ApprovedStatement>(1);
+                        _byProcedure[name] = candidates;
+                    }
+
+                    candidates.Add(statement);
                     continue;
                 }
 
@@ -76,7 +104,15 @@ namespace Optimizely.Performance.SQL.Rewriting
                 _byFingerprint[key] = statement;
             }
 
-            Count = _byFingerprint.Count + _byProcedure.Count;
+            // Counts entries, not procedure names, so a procedure with a CMS 11 and a CMS 12
+            // replacement reports as the two approvals it is.
+            var redirectCount = 0;
+            foreach (var candidates in _byProcedure.Values)
+            {
+                redirectCount += candidates.Count;
+            }
+
+            Count = _byFingerprint.Count + redirectCount;
             ActiveCount = CountActive(statements, _options.Version);
         }
 
@@ -112,10 +148,44 @@ namespace Optimizely.Performance.SQL.Rewriting
             {
                 var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                foreach (var statement in _byProcedure.Values)
+                foreach (var candidates in _byProcedure.Values)
                 {
-                    names.Add(statement.Procedure.OriginalName);
-                    names.Add(statement.Procedure.ReplacementName);
+                    foreach (var statement in candidates)
+                    {
+                        names.Add(statement.Procedure.OriginalName);
+                        names.Add(statement.Procedure.ReplacementName);
+
+                        // Procedures a precondition names are probed too, or the precondition
+                        // that requires them could never be satisfied.
+                        var preconditions = statement.Preconditions;
+
+                        if (preconditions == null)
+                        {
+                            continue;
+                        }
+
+                        if (preconditions.RequiredProcedures != null)
+                        {
+                            foreach (var name in preconditions.RequiredProcedures)
+                            {
+                                if (!string.IsNullOrEmpty(name))
+                                {
+                                    names.Add(name);
+                                }
+                            }
+                        }
+
+                        if (preconditions.RequiredProcedureBodies != null)
+                        {
+                            foreach (var expected in preconditions.RequiredProcedureBodies)
+                            {
+                                if (!string.IsNullOrEmpty(expected.Key))
+                                {
+                                    names.Add(expected.Key);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 return names;
@@ -194,10 +264,19 @@ namespace Optimizely.Performance.SQL.Rewriting
         /// <param name="procedureName">Procedure the command is about to execute.</param>
         /// <param name="capabilities">Probed facts about the target database.</param>
         /// <remarks>
+        /// <para>
         /// Three things must hold before the call is redirected: the replacement must
         /// actually exist in this database, the original must still hash to what the
         /// replacement was written against, and the entry's own preconditions must be
         /// satisfied. Any of them failing leaves the shipped procedure to run.
+        /// </para>
+        /// <para>
+        /// A procedure may have several approved replacements -- a CMS 11 body and a CMS 12
+        /// one, or a pair covering different compatibility levels. Each candidate is put
+        /// through those same three gates in configuration order and the first to clear them
+        /// all is used. When none clears, the reason reported is that of the candidate that
+        /// got furthest, which is the one that was nearly right; see <see cref="GateProgress"/>.
+        /// </para>
         /// </remarks>
         public RewriteResult ResolveProcedure(string procedureName, DatabaseCapabilities capabilities)
         {
@@ -206,46 +285,44 @@ namespace Optimizely.Performance.SQL.Rewriting
                 return RewriteResult.NoChange;
             }
 
-            ApprovedStatement statement;
-            if (!_byProcedure.TryGetValue(DatabaseCapabilities.Normalize(procedureName), out statement))
+            List<ApprovedStatement> candidates;
+            if (!_byProcedure.TryGetValue(DatabaseCapabilities.Normalize(procedureName), out candidates))
             {
                 return RewriteResult.NoChange;
             }
 
-            if (!statement.IsActiveFor(_options.Version))
-            {
-                return Report(RewriteResult.Suppressed(statement, RewriteOutcome.NotActive), null, procedureName);
-            }
-
             var effective = capabilities ?? DatabaseCapabilities.Unknown;
-            var redirect = statement.Procedure;
 
-            // The redirect is only meaningful against a probed database: without knowing
-            // what is deployed we cannot tell a missing replacement from a present one.
-            if (!effective.IsProbed || !effective.HasProcedure(redirect.ReplacementName))
+            ApprovedStatement statement = null;
+            ProcedureRedirect redirect = null;
+            RewriteOutcome bestRejection = RewriteOutcome.NotActive;
+            ApprovedStatement bestRejected = null;
+            var bestProgress = -1;
+
+            foreach (var candidate in candidates)
             {
-                return Report(
-                    RewriteResult.Suppressed(statement, RewriteOutcome.ReplacementProcedureMissing),
-                    null,
-                    procedureName);
+                var rejection = Rejects(candidate, effective);
+
+                if (rejection == null)
+                {
+                    statement = candidate;
+                    redirect = candidate.Procedure;
+                    break;
+                }
+
+                var progress = GateProgress(rejection.Value);
+
+                if (progress > bestProgress)
+                {
+                    bestProgress = progress;
+                    bestRejected = candidate;
+                    bestRejection = rejection.Value;
+                }
             }
 
-            // A hash is required. Without one we cannot show the original still matches
-            // what the replacement was written against, so we do not redirect.
-            if (!effective.ProcedureBodyMatches(redirect.OriginalName, redirect.OriginalBodyHash))
+            if (statement == null)
             {
-                return Report(
-                    RewriteResult.Suppressed(statement, RewriteOutcome.OriginalProcedureDrifted),
-                    null,
-                    procedureName);
-            }
-
-            if (!effective.Satisfies(statement.Preconditions))
-            {
-                return Report(
-                    RewriteResult.Suppressed(statement, RewriteOutcome.PreconditionsNotMet),
-                    null,
-                    procedureName);
+                return Report(RewriteResult.Suppressed(bestRejected, bestRejection), null, procedureName);
             }
 
             if (_options.ShadowMode)
@@ -257,6 +334,71 @@ namespace Optimizely.Performance.SQL.Rewriting
                 RewriteResult.Redirected(statement, redirect.ReplacementName),
                 null,
                 procedureName);
+        }
+
+        /// <summary>
+        /// How far through the gates a rejected candidate got, so the most informative
+        /// rejection can be the one reported.
+        /// </summary>
+        /// <remarks>
+        /// Reporting the first candidate's rejection is misleading once entries are
+        /// version-specific, because most of them were never meant to apply. A Commerce 14
+        /// database above the compatibility ceiling would report OriginalProcedureDrifted
+        /// from the Commerce 15 entry -- sending an operator to look for a CMS patch that
+        /// does not exist -- when the honest answer is the ceiling. The candidate that got
+        /// furthest is the one that was nearly right, so its reason is the useful one.
+        /// </remarks>
+        private static int GateProgress(RewriteOutcome rejection)
+        {
+            switch (rejection)
+            {
+                case RewriteOutcome.NotActive: return 0;
+                case RewriteOutcome.ReplacementProcedureMissing: return 1;
+                case RewriteOutcome.OriginalProcedureDrifted: return 2;
+                case RewriteOutcome.PreconditionsNotMet: return 3;
+                default: return 0;
+            }
+        }
+
+        /// <summary>
+        /// Why <paramref name="statement"/> cannot be used against this database, or null
+        /// when it can.
+        /// </summary>
+        /// <remarks>
+        /// Every gate here is fail-closed: anything unknown or unproven rejects, so the
+        /// procedure Optimizely shipped is what runs. That is what makes it safe to try
+        /// several candidates in a row -- the loop can only ever end in a redirect that
+        /// passed all three checks, or in no redirect at all.
+        /// </remarks>
+        private RewriteOutcome? Rejects(ApprovedStatement statement, DatabaseCapabilities capabilities)
+        {
+            if (!statement.IsActiveFor(_options.Version))
+            {
+                return RewriteOutcome.NotActive;
+            }
+
+            var redirect = statement.Procedure;
+
+            // The redirect is only meaningful against a probed database: without knowing
+            // what is deployed we cannot tell a missing replacement from a present one.
+            if (!capabilities.IsProbed || !capabilities.HasProcedure(redirect.ReplacementName))
+            {
+                return RewriteOutcome.ReplacementProcedureMissing;
+            }
+
+            // A hash is required. Without one we cannot show the original still matches
+            // what the replacement was written against, so we do not redirect.
+            if (!capabilities.ProcedureBodyMatches(redirect.OriginalName, redirect.OriginalBodyHash))
+            {
+                return RewriteOutcome.OriginalProcedureDrifted;
+            }
+
+            if (!capabilities.Satisfies(statement.Preconditions))
+            {
+                return RewriteOutcome.PreconditionsNotMet;
+            }
+
+            return null;
         }
 
         /// <summary>

@@ -1,0 +1,332 @@
+{
+  "schemaVersion": 1,
+  "generatedBy": "First-round triage of the CMS and Commerce query corpus against the production fleet survey of 2026-08-12. Every entry is a ProcedureRedirect: the replacement is an additional object deployed alongside Optimizely's, and nothing here alters, drops or replaces anything Optimizely ships. Bodies live in sql/, one file per entry; the reasoning for each is in that file's header and in approvals/. See docs/query-triage.md for the corpus this was drawn from, including the queries examined and deliberately not rewritten.",
+  "statements": [
+    {
+      "id": "OPT-0001",
+      "title": "ecf_OrderSearch: semi-join the metaclass union instead of joining a materialised DISTINCT",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "All",
+      "enabled": false,
+      "approvalDocument": "approvals/OPT-0001-ecf-order-search.md",
+      "procedure": {
+        "originalName": "ecf_OrderSearch",
+        "replacementName": "ecf_OrderSearch_optiperf_v1",
+        "originalBodyHash": "630869a7b9907531264250eaa58f75bca6f36c71823d3bbce3c7e85fb21bd4fc"
+      },
+      "risk": "Moderate",
+      "riskRationale": "The result set is provably unchanged for every input: nothing in the outer query projects from the derived table, and the join was to a DISTINCT single column, so a join and an existence test select the same rows with the same multiplicity. The plan is not provably unchanged. This is the most heavily used query in Commerce and the statement is assembled at runtime from caller-supplied filter text, so the plan shapes in production cannot be enumerated from the source. A semi-join is the right default because it lets the filter run before the metaclass probe, but a filter matching most of the table could make a per-row probe cost more than the materialisation it replaced. Shadow-mode first, on the store with the largest OrderGroup.",
+      "impact": {
+        "databasesAffected": 75,
+        "surveyDiagnosis": "Largest single item in the survey at roughly an eighth of all fleet logical reads. The uncorrelated derived table forces a full read of every order metaclass table plus a DISTINCT before the caller's filter can be applied, so search cost scales with total order history rather than with the number of matching orders. The count query repeats the same work whenever @ReturnTotalCount is set.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      },
+      "notes": "Disabled pending shadow-mode measurement; the redirect is catalogued, not armed. @SQLClause, @MetaSQLClause and @OrderBy are concatenated unparameterised by the original, which costs a plan cache entry per distinct search and is an injection surface. Both are real and neither is fixable here without changing the contract with the calling assembly; reported upstream rather than patched."
+    },
+    {
+      "id": "OPT-0002",
+      "title": "netContentListPaged (CMS 12): recompile the table-variable joins and call the optimised list-property function",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "V12",
+      "enabled": false,
+      "approvalDocument": "approvals/OPT-0002-net-content-list-paged.md",
+      "procedure": {
+        "originalName": "netContentListPaged",
+        "replacementName": "netContentListPaged_optiperf_v1",
+        "originalBodyHash": "a7be4b6e6ebd4a95dc9d9a72478d66dcca8710da11a6f5bab0eb1e0c0725f3fd"
+      },
+      "preconditions": {
+        "maximumCompatibilityLevel": 140,
+        "requiredProcedures": ["GetListPropertiesOverThreshold_optiperf_v1"]
+      },
+      "risk": "Moderate",
+      "riskRationale": "The seven recompile hints are Low on their own and cannot change any result. The rating is inherited from OPT-0006, the list-property function this procedure is pointed at, whose set-based prefix reduction differs from the original loop when a scope name contains a LIKE wildcard. Risk does not stay behind a procedure call: a caller is at least as risky as what it calls. Sites using underscores in list property scope names must not enable this.",
+      "impact": {
+        "databasesAffected": 185,
+        "surveyDiagnosis": "Second largest single item, around a tenth of fleet logical reads across twelve statements. Every statement joins the @ContentItems table variable, estimated at one row below compatibility level 150 however many ids the batch actually carries, so a loader called with two hundred ids gets a plan built for one.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      },
+      "notes": "Requires GetListPropertiesOverThreshold_optiperf_v1 (OPT-0006) deployed first; that function is not itself a redirect because the client never calls it directly. Replacing @ContentItems with a #temp table is the better long-term fix and is deferred to v2 -- it changes tempdb behaviour and transaction scope and cannot be argued correct by inspection."
+    },
+    {
+      "id": "OPT-0003",
+      "title": "editDeletePageCheckInternal (CMS 12): index @Result on OwnerID and recompile against real cardinality",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "V12",
+      "approvalDocument": "approvals/OPT-0003-edit-delete-page-check.md",
+      "procedure": {
+        "originalName": "editDeletePageCheckInternal",
+        "replacementName": "editDeletePageCheckInternal_optiperf_v1",
+        "originalBodyHash": "338bc5e181854d9ec067264f921e3789fa2e08766e92fb134713330f7f52da86"
+      },
+      "preconditions": {
+        "maximumCompatibilityLevel": 140,
+        "minimumSqlServerMajorVersion": 12
+      },
+      "risk": "Low",
+      "riskRationale": "An index on a table variable and a recompile directive are both invisible to results: neither can change which rows a statement returns or in what order. No join, predicate or projection is altered. Inline table variable index syntax needs SQL Server 2014, which the version floor enforces.",
+      "impact": {
+        "databasesAffected": 95,
+        "surveyDiagnosis": "@Result is built by five INSERTs, pruned by two DELETEs and returned sorted. Below compatibility level 150 everything after the first INSERT is planned for one row, and the two DELETEs and the final sort run against an unindexed heap; both DELETEs and the ORDER BY drive off OwnerID.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      }
+    },
+    {
+      "id": "OPT-0004",
+      "title": "netContentDataLoad (CMS 12): fold three primary-key seeks of one row into one",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "V12",
+      "approvalDocument": "approvals/OPT-0004-net-content-data-load.md",
+      "procedure": {
+        "originalName": "netContentDataLoad",
+        "replacementName": "netContentDataLoad_optiperf_v1",
+        "originalBodyHash": "3c6f914976a5701ef709891c1c311d798ab2ad25b150f8010ec528c7943331f1"
+      },
+      "risk": "Low",
+      "riskRationale": "One statement folded into another, reading the same two columns of the same row. No join, predicate or projection altered and no dependence on the optimiser choosing well. The one subtlety is guarded explicitly: when no row exists for @ContentID the original leaves @LanguageBranchID at the caller's value, so the folded form tests @MasterLanguageID IS NOT NULL before overwriting it. Without that guard a missing row would set it to NULL.",
+      "impact": {
+        "databasesAffected": 361,
+        "surveyDiagnosis": "Present in nearly every surveyed database. The prologue seeked tblContent by primary key up to three times to read two columns of a single row -- once for the content type, conditionally once for the master language fallback, and once more for the master language.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      },
+      "notes": "Unconditional: no table variable, nothing to gate on. @ContentTypeID is retained in the folded SELECT though the procedure never reads it, so a diff against the original raises no question that has to be re-answered."
+    },
+    {
+      "id": "OPT-0005",
+      "title": "ecf_CatalogEntry_Components (Commerce 15): recompile the three table-valued-parameter joins",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "All",
+      "approvalDocument": "approvals/OPT-0005-catalog-entry-components.md",
+      "procedure": {
+        "originalName": "ecf_CatalogEntry_Components",
+        "replacementName": "ecf_CatalogEntry_Components_optiperf_v1",
+        "originalBodyHash": "5eb414a61359500874df64a786f047a3028f848d3753ade354a72378a35cd6ed"
+      },
+      "preconditions": {
+        "maximumCompatibilityLevel": 140
+      },
+      "risk": "Low",
+      "riskRationale": "Recompile directives only. Same tables, same joins, same projections, same response-group branching, same three result sets in the same order. A recompile cannot change which rows a statement returns.",
+      "impact": {
+        "databasesAffected": 100,
+        "surveyDiagnosis": "Three statements each joining the @CatalogEntryIds table-valued parameter, executed in the hundreds of millions. Below compatibility level 150 a table-valued parameter is a table variable and estimates at one row, so all three get nested-loop plans sized for a single entry while the catalog loader passes a page of them.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      },
+      "notes": "Commerce 15 only. Commerce 14's copy returns an extra Merchant result set in the variation branch and is covered by OPT-0014; the two bodies hash differently, so a database can only match the entry written for the version it runs."
+    },
+    {
+      "id": "OPT-0014",
+      "title": "ecf_CatalogEntry_Components (Commerce 14): recompile the four table-valued-parameter joins",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "All",
+      "approvalDocument": "approvals/OPT-0005-catalog-entry-components.md",
+      "procedure": {
+        "originalName": "ecf_CatalogEntry_Components",
+        "replacementName": "ecf_CatalogEntry_Components_com14_optiperf_v1",
+        "originalBodyHash": "6f1ad05ab57e5ff6a46ae9ea6d43f9b81f3a08e5b320d6bc19f7511c4c6dbdc9"
+      },
+      "preconditions": {
+        "maximumCompatibilityLevel": 140
+      },
+      "risk": "Low",
+      "riskRationale": "Recompile directives only, and the Commerce 14 body is reproduced including the Merchant select that Commerce 15 dropped, so the caller still gets four result sets in the original order. A recompile cannot change which rows a statement returns.",
+      "impact": {
+        "databasesAffected": 100,
+        "surveyDiagnosis": "Same diagnosis as OPT-0005 with one more statement: the variation branch selects from Variation and then again from Merchant, and both join the table-valued parameter that estimates at one row below compatibility level 150.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      },
+      "notes": "Exists as a separate entry because pointing a Commerce 14 caller at the Commerce 15 copy would silently return one result set fewer than the reader expects."
+    },
+    {
+      "id": "OPT-0007",
+      "title": "ecf_NodeEntryRelations: recompile the table-valued-parameter join",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "All",
+      "approvalDocument": "approvals/OPT-0007-node-entry-relations.md",
+      "procedure": {
+        "originalName": "ecf_NodeEntryRelations",
+        "replacementName": "ecf_NodeEntryRelations_optiperf_v1",
+        "originalBodyHash": "d472b98672759dd1cf6a8d0e01015b449c682c828a0733b239fb0e322e12099a"
+      },
+      "preconditions": {
+        "maximumCompatibilityLevel": 140
+      },
+      "risk": "Low",
+      "riskRationale": "One statement, one added hint. A recompile directive cannot change the rows returned.",
+      "impact": {
+        "databasesAffected": 108,
+        "surveyDiagnosis": "Over half a billion executions in the survey window. Nothing is wrong with the query; the table variable estimate is wrong, and only below compatibility level 150.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      },
+      "notes": "Body identical in Commerce 14 and 15, so one entry covers both."
+    },
+    {
+      "id": "OPT-0008",
+      "title": "ecf_CatalogEntry_List (Commerce 15): recompile the table-valued-parameter joins and call the versioned components procedure",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "All",
+      "approvalDocument": "approvals/OPT-0008-catalog-entry-list.md",
+      "procedure": {
+        "originalName": "ecf_CatalogEntry_List",
+        "replacementName": "ecf_CatalogEntry_List_optiperf_v1",
+        "originalBodyHash": "2ff73cbeddc3d8e23157362252b183648ba377a1730ae2f2946983f35e360c66"
+      },
+      "preconditions": {
+        "maximumCompatibilityLevel": 140,
+        "requiredProcedures": ["ecf_CatalogEntry_Components_optiperf_v1"],
+        "requiredProcedureBodies": {
+          "ecf_CatalogEntry_Components": "5eb414a61359500874df64a786f047a3028f848d3753ade354a72378a35cd6ed"
+        }
+      },
+      "risk": "Low",
+      "riskRationale": "Recompile directives, plus a call redirected to a body whose own equivalence argument is recorded in OPT-0005. No join, predicate or projection altered; the ORDER BY on the first statement is the original's.",
+      "impact": {
+        "databasesAffected": 100,
+        "surveyDiagnosis": "The catalog entry batch loader. Four statements join the @CatalogEntries table-valued parameter, one of them copying it into a second table variable before handing it to the components procedure. Below compatibility level 150 every one of those is planned for a single row.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      },
+      "notes": "This procedure is byte-identical in Commerce 14 and 15, so its own hash cannot say which version it is. The discriminator is the callee: this entry requires ecf_CatalogEntry_Components to hash to the Commerce 15 body, OPT-0015 requires the Commerce 14 body. The two conditions cannot both hold, so the pair is mutually exclusive by construction rather than by ordering."
+    },
+    {
+      "id": "OPT-0015",
+      "title": "ecf_CatalogEntry_List (Commerce 14): recompile the table-valued-parameter joins and call the Commerce 14 components copy",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "All",
+      "approvalDocument": "approvals/OPT-0008-catalog-entry-list.md",
+      "procedure": {
+        "originalName": "ecf_CatalogEntry_List",
+        "replacementName": "ecf_CatalogEntry_List_com14_optiperf_v1",
+        "originalBodyHash": "2ff73cbeddc3d8e23157362252b183648ba377a1730ae2f2946983f35e360c66"
+      },
+      "preconditions": {
+        "maximumCompatibilityLevel": 140,
+        "requiredProcedures": ["ecf_CatalogEntry_Components_com14_optiperf_v1"],
+        "requiredProcedureBodies": {
+          "ecf_CatalogEntry_Components": "6f1ad05ab57e5ff6a46ae9ea6d43f9b81f3a08e5b320d6bc19f7511c4c6dbdc9"
+        }
+      },
+      "risk": "Low",
+      "riskRationale": "Identical in kind to OPT-0008: recompile directives and a call to the versioned components copy, here the Commerce 14 one, which preserves the Merchant result set. No join, predicate or projection altered.",
+      "impact": {
+        "databasesAffected": 100,
+        "surveyDiagnosis": "Same diagnosis as OPT-0008. The loader text is the same in both Commerce versions; only what it calls differs.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      },
+      "notes": "See OPT-0008 for why the pair is discriminated on the callee's body hash rather than on this procedure's own."
+    },
+    {
+      "id": "OPT-0009",
+      "title": "netContentChildrenReferences: make the language-branch lookup sargable",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "All",
+      "approvalDocument": "approvals/OPT-0009-net-content-children-references.md",
+      "procedure": {
+        "originalName": "netContentChildrenReferences",
+        "replacementName": "netContentChildrenReferences_optiperf_v1",
+        "originalBodyHash": "bfa79ece7f8476408d3260c66973889a3217ed9cdaefca6cd3c47b741cb4cc34"
+      },
+      "preconditions": {
+        "requiresCaseInsensitiveCollation": true
+      },
+      "risk": "Low",
+      "riskRationale": "Under the case-insensitive collation this is gated on, LOWER(a) = LOWER(b) and a = b agree for every pair of values, so the two predicates are indistinguishable. If the probe cannot establish the collation, or establishes a case-sensitive one, the redirect is skipped. Accent insensitivity is deliberately not required: LOWER() does not fold accents, so the original and the rewrite behave identically on an accent-sensitive collation, and requiring it would exclude databases the rewrite is correct on. The @@ROWCOUNT < 1 fallback test remains the statement directly following the SELECT, which is the only way it stays correct.",
+      "impact": {
+        "databasesAffected": 139,
+        "surveyDiagnosis": "The one genuinely non-sargable column-side LOWER() in the CMS schema. Be clear about the size of it: tblLanguageBranch holds one row per configured language, so turning a twelve-row scan into a seek saves essentially nothing. The procedure's real cost is the child listing sort, which is proportional to the number of children under one parent and is inherent to the request.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      },
+      "notes": "This entry is where the LOWER() investigation ended up. Every LOWER() in the CMS and Commerce schemas was examined; nearly all are scalar assignments evaluated once, or predicates against the LoweredUserName and LoweredRoleName columns Optimizely denormalises precisely to keep them sargable. Across all four shipped packages exactly two column-side LOWER() predicates exist: this one, and one in a Commerce metaclass DDL procedure that runs at deployment time. The anticipated low-risk tier turned out to be a single query with a negligible payoff. The change is made because the procedure is being copied anyway."
+    },
+    {
+      "id": "OPT-0010",
+      "title": "netContentListPaged (CMS 11, level 150+): unpack the id list set-based instead of four bytes at a time",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "V11",
+      "approvalDocument": "approvals/OPT-0010-net-content-list-paged-cms11.md",
+      "procedure": {
+        "originalName": "netContentListPaged",
+        "replacementName": "netContentListPaged_cms11_optiperf_v1",
+        "originalBodyHash": "3361392ac4966c03786f660de36e3c13755249f2478311012eb84718e9b77c05"
+      },
+      "preconditions": {
+        "minimumCompatibilityLevel": 150
+      },
+      "risk": "Low",
+      "riskRationale": "Only the population of @ContentItems changes. The tally CTE generates offsets 1, 5, 9, ... for ceil(@Length / 4) rows, which is exactly the set of offsets the WHILE loop visited and exactly its termination test, including a trailing partial group. Insert order is not preserved and does not need to be: every statement reading @ContentItems has an explicit ORDER BY and none orders by anything derived from insertion sequence. Verified as well as argued -- both forms were run against 200 randomly generated payloads of 0 to 300 ids, roughly one in seven truncated to a non-multiple of four bytes, and produced identical multisets in every trial.",
+      "impact": {
+        "databasesAffected": 99,
+        "totalExecutions": 7600000000,
+        "surveyDiagnosis": "CMS 11 has no table-valued parameter here: the caller packs content ids into a VARBINARY(8000) and the procedure unpacks them one INSERT per four bytes. That single INSERT is the highest-execution statement in the entire survey at 7.6 billion executions, up to 2,000 statement round trips per call.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      },
+      "notes": "Paired with OPT-0011 across disjoint compatibility windows: this one from level 150 up, OPT-0011 at 140 and below. Same body, except that OPT-0011 also carries the table-variable recompile hints, which at 150 and above would be pure compile cost on seven statements per call. The loop is worth fixing at every level, which is why there are two entries rather than one capped one. The CMS 11 and CMS 12 procedures share a name and not much else -- different signature, different table, different column names, roughly 78 lines apart -- so this is a separately derived body carrying its own hash, not a port."
+    },
+    {
+      "id": "OPT-0011",
+      "title": "netContentListPaged (CMS 11, level 140 and below): set-based unpack plus table-variable recompiles",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "V11",
+      "approvalDocument": "approvals/OPT-0010-net-content-list-paged-cms11.md",
+      "procedure": {
+        "originalName": "netContentListPaged",
+        "replacementName": "netContentListPaged_cms11_optiperf_v2",
+        "originalBodyHash": "3361392ac4966c03786f660de36e3c13755249f2478311012eb84718e9b77c05"
+      },
+      "preconditions": {
+        "maximumCompatibilityLevel": 140
+      },
+      "risk": "Low",
+      "riskRationale": "Both changes are result-preserving by inspection. The unpack argument is OPT-0010's, unchanged and equally tested. The seven recompile hints are compilation directives and cannot change which rows a statement returns; they do not disturb the @@ROWCOUNT tests that follow two of the SELECTs, since a hint is part of the statement it is attached to. Neither change depends on the optimiser choosing well, only on it being given true information.",
+      "impact": {
+        "databasesAffected": 99,
+        "totalExecutions": 7600000000,
+        "surveyDiagnosis": "OPT-0010's unpack diagnosis, plus the table variable estimate. Seven statements read @ContentItems -- the language resolution UPDATE, the language list, the version list, the page data, the property load, the categories and the access rows -- and below compatibility level 150 all seven are planned for one row. The property load is the expensive one: a nested loop into tblContentProperty per page is fine for one page and not for two thousand.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      },
+      "notes": "See OPT-0010. The two entries are mutually exclusive by compatibility level, so exactly one is ever eligible on a given database and a database upgrading from 140 to 150 crosses between them at its next capability probe, with no configuration change."
+    },
+    {
+      "id": "OPT-0012",
+      "title": "netContentDataLoad (CMS 11): fold three primary-key seeks of one row into one",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "V11",
+      "approvalDocument": "approvals/OPT-0004-net-content-data-load.md",
+      "procedure": {
+        "originalName": "netContentDataLoad",
+        "replacementName": "netContentDataLoad_cms11_optiperf_v1",
+        "originalBodyHash": "40cdd22a413e3fef33d45c13253723fefe72dc4aaf2e67529e822c523771c1ee"
+      },
+      "risk": "Low",
+      "riskRationale": "OPT-0004's argument without amendment. The CMS 11 and CMS 12 bodies differ by six lines, all in the property load where CMS 12 added BranchSpecificScope handling; the prologue this rewrite touches is character for character identical between them. The @MasterLanguageID IS NOT NULL guard is the load-bearing part and is present here for the same reason.",
+      "impact": {
+        "databasesAffected": 361,
+        "surveyDiagnosis": "As OPT-0004: up to three primary-key seeks of tblContent to read two columns of one row, in a procedure that loads a single content item and is called constantly.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      },
+      "notes": "Unconditional, like its CMS 12 counterpart."
+    },
+    {
+      "id": "OPT-0013",
+      "title": "editDeletePageCheckInternal (CMS 11): index @Result on OwnerID and recompile against real cardinality",
+      "kind": "ProcedureRedirect",
+      "appliesTo": "V11",
+      "approvalDocument": "approvals/OPT-0003-edit-delete-page-check.md",
+      "procedure": {
+        "originalName": "editDeletePageCheckInternal",
+        "replacementName": "editDeletePageCheckInternal_cms11_optiperf_v1",
+        "originalBodyHash": "8d92cf4a3abcd2904b9b47445064eb79bc3cfc9297f9599d2b7fbedaeb006fb3"
+      },
+      "preconditions": {
+        "maximumCompatibilityLevel": 140,
+        "minimumSqlServerMajorVersion": 12
+      },
+      "risk": "Low",
+      "riskRationale": "OPT-0003's argument. An index on a table variable and a recompile directive cannot change which rows a statement returns. The CMS 11 body differs from CMS 12 by eleven lines, all of them IS NOT NULL guards CMS 12 added in two archive-reference INSERTs; those are reproduced exactly as CMS 11 ships them, because adding a CMS 12 correctness change here would be a behaviour change wearing a performance rewrite's clothes.",
+      "impact": {
+        "databasesAffected": 95,
+        "surveyDiagnosis": "As OPT-0003: five INSERTs building @Result, two DELETEs pruning it and a final sort, all planned for one row below compatibility level 150 and all running against an unindexed heap. Both DELETEs and the ORDER BY drive off OwnerID.",
+        "source": "prod-fleet-sweep-2026-08-12"
+      }
+    }
+  ]
+}

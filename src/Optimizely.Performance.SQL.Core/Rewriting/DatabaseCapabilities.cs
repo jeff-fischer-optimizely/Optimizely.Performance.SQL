@@ -189,11 +189,39 @@ namespace Optimizely.Performance.SQL.Rewriting
                 return false;
             }
 
+            if (preconditions.MaximumCompatibilityLevel.HasValue
+                && CompatibilityLevel > preconditions.MaximumCompatibilityLevel.Value)
+            {
+                return false;
+            }
+
             if (preconditions.RequiredIndexes != null)
             {
                 foreach (var index in preconditions.RequiredIndexes)
                 {
                     if (!HasIndex(index))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            if (preconditions.RequiredProcedures != null)
+            {
+                foreach (var procedure in preconditions.RequiredProcedures)
+                {
+                    if (!HasProcedure(procedure))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            if (preconditions.RequiredProcedureBodies != null)
+            {
+                foreach (var expected in preconditions.RequiredProcedureBodies)
+                {
+                    if (!ProcedureBodyMatches(expected.Key, expected.Value))
                     {
                         return false;
                     }

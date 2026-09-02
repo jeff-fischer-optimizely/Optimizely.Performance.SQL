@@ -1,4 +1,5 @@
 using System;
+using Optimizely.Performance.SQL.Configuration;
 
 namespace Optimizely.Performance.SQL.Rewriting
 {

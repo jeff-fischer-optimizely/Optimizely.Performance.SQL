@@ -4,10 +4,12 @@ A runtime SQL statement rewrite shim for Optimizely CMS 11 and 12. It recognises
 statement the CMS is about to execute and substitutes a performance-approved variant,
 without changing a line of application code — current or historical.
 
-> **Status: early. Not production-ready yet.** The core decision engine is written and
-> covered by tests, including an integration suite against a real SQL Server. The hosting
-> adapters and the approved-SQL corpus are not written. See
-> [What is not here yet](#what-is-not-here-yet) before you plan around this.
+> **Status: early. Not production-ready yet.** The core decision engine and both hosting
+> adapters are written and covered by tests, including suites that run against a real SQL
+> Server and assert on what the *server* returned. The approved-SQL corpus is not written,
+> so out of the box the engine has nothing to rewrite, and neither adapter has yet been run
+> under a real Optimizely site. See [What is not here yet](#what-is-not-here-yet) before you
+> plan around this.
 
 ## Why
 
@@ -53,16 +55,28 @@ case-insensitive collation states that. A rewrite that only helps at compatibili
 safe. Skipping is always correct — the original statement still runs.
 
 **Plug and play.** No index catalogue, no per-customer fleet matrix, no deployment
-choreography. Drop the package in, point the factory at it, ship a config file.
+choreography. Drop the package in, ship a config file.
+
+**Edit the command; never replace it.** `SqlCommand` is sealed, and EPiServer casts a
+`DbCommand` straight to `SqlCommand` at 25 sites in CMS 11 to reach provider-specific
+members. Any decorator therefore dies on an `InvalidCastException` the moment it reaches
+one of them. So the shim mutates the real command in place immediately before execution and
+puts the original text back immediately after — the caller never sees a type it did not
+create, and never sees text it did not set.
 
 ## How it works
 
+Interception is version-specific; everything after it is shared.
+
 ```
-   CMS calls DbProviderFactory.CreateCommand()
-                  │
-   RewritingDbProviderFactory  ──►  decorates the real SqlClientFactory
-                  │
-   RewritingDbCommand.ExecuteReader()
+  CMS 11 (net472)                        CMS 12 (net6.0+)
+  System.Data.SqlClient                  Microsoft.Data.SqlClient
+       │                                      │
+  Harmony patches SqlCommand's            SqlClient raises
+  8 public + 2 protected                  WriteCommandBefore and hands
+  execution methods                       over the command itself
+       │                                      │
+       └──────────────► CommandRewriter.Apply(command, context) ◄──────────┘
                   │
                   ├─ CommandType is Text or StoredProcedure?     no ──► pass through
                   ├─ shim enabled and registry non-empty?        no ──► pass through
@@ -80,13 +94,55 @@ choreography. Drop the package in, point the factory at it, ship a config file.
                   ├─ RewriteResult.ShouldReplace  ──►  swap CommandText, drop parameters
                   └─ IRewriteObserver.OnRewriteEvaluated(...)
                   │
-   inner command executes
+   the command executes, then CommandRewrite.Restore() puts the original text back
 ```
 
 The overwhelmingly common answer is `RewriteResult.NoChange`, and the fast paths are built
 around that: `RewriteContext.IsInert` short-circuits before any hashing, stored-procedure
 commands skip out immediately unless the registry actually contains a redirect, and
 normalisation happens once and feeds the fingerprint directly.
+
+### CMS 11: Harmony
+
+.NET Framework's in-box `System.Data.SqlClient` publishes no diagnostic source, so there is
+no supported hook and the only remaining option is IL patching. `SqlCommandPatcher` patches
+every execution method `SqlCommand` declares — the eight public ones and, critically,
+`ExecuteDbDataReader` / `ExecuteDbDataReaderAsync`, because `DbCommand.ExecuteReader()` is
+non-virtual and dispatches to the protected pair. CMS 11 holds the command as a `DbCommand`
+at roughly 97 sites, so a public-methods-only patch set would silently miss most of them.
+
+Two details are load-bearing and were each settled by measurement rather than reasoning:
+
+- **A finalizer, not a postfix.** Harmony skips postfixes when the original throws, which
+  would leave a failed command holding rewritten text — fatal, because EPiServer retries
+  deadlocks on the same command object. A finalizer runs on both paths. The measured cost is
+  a stack trace truncated from 10 frames to 3; the exception type, message and the EPiServer
+  call chain all survive.
+- **A reentrancy guard.** `SqlCommand`'s execution methods call each other, so one logical
+  call enters the patched set twice on every reader path. A `[ThreadStatic]` guard keyed by
+  the command *instance* — not a bare flag — means a missed finalizer suppresses interception
+  for that one command rather than poisoning the whole thread.
+
+`[assembly: PreApplicationStartMethod]` installs before `Application_Start` and before
+EPiServer initialisation, which matters because an Optimizely site does a great deal of its
+slowest database work while starting up.
+
+### CMS 12: DiagnosticSource
+
+`Microsoft.Data.SqlClient` announces every command immediately before it executes and hands
+over the command object, so this adapter patches nothing. It subscribes to
+`SqlClientDiagnosticListener`, filtered to the three command events so SqlClient never
+builds payloads for anything else, and matches `WriteCommandBefore` to `WriteCommandAfter`
+or `WriteCommandError` by the payload's `OperationId`. A payload whose operation id cannot
+be read has its rewrite withdrawn on the spot, since nothing could ever undo it later.
+
+The payload's `Command` is read as `System.Data.Common.DbCommand` by reflection, so the
+adapter carries no reference to `Microsoft.Data.SqlClient` and works with whichever version
+the site resolves.
+
+`AddOptimizelyPerformanceSql()` installs eagerly during `ConfigureServices` rather than on
+first resolve, for the same startup-coverage reason. Calling `PerformanceSqlShim.Install()`
+on the first line of `Program.cs` is earlier still.
 
 ### Fingerprinting
 
@@ -171,7 +227,7 @@ skipped" is the diagnostic case that matters.
 
 | Option | Default | Purpose |
 |---|---|---|
-| `Enabled` | `true` | Master kill switch. Decorators stay in the path and pass through. |
+| `Enabled` | `true` | Master kill switch, checked before anything is installed at all. |
 | `Version` | `All` | Which CMS version's rewrites to load. Set by the adapter. |
 | `ShadowMode` | `false` | Resolve and report, but do not substitute. |
 | `ConfigurationPath` | `config/approved-sql.json` | Relative paths resolve against the app base directory. |
@@ -180,14 +236,20 @@ skipped" is the diagnostic case that matters.
 | `ProbeDatabaseCapabilities` | `true` | Off means conditional rewrites never apply. |
 
 A missing `approved-sql.json` yields an empty document and the site starts normally. A
-*malformed* one throws at startup, because silently running unrewritten after a bad deploy
-is worse than failing loudly.
+*malformed* one leaves the shim inert and reports why on `ShimStatus.LoadError` — the site
+still starts, and still serves, because a bad config file is not a reason to take an
+Optimizely site down. Check `ShimStatus` on startup if you want the loud version.
+
+Failure discipline differs between the first load and later ones. A *reload* that fails
+keeps the configuration already in force, because the likely cause is reading the file
+halfway through an operator's save, and going inert there would silently switch the
+optimisation off in production.
 
 ## Layout
 
 ```
 src/Optimizely.Performance.SQL.Core/     netstandard2.0 — shared by both CMS versions
-  Ado/                RewritingDbProviderFactory / Connection / Command / Transaction
+  Interception/       CommandRewriter, CommandRewrite, RewriteHost
   Configuration/      ApprovedSqlDocument, ApprovedStatement, StatementVariant,
                       VariantCondition, RewritePreconditions, ProcedureRedirect,
                       RewriteKind, RewriteOptions, CmsVersion, ApprovedSqlLoader
@@ -195,14 +257,52 @@ src/Optimizely.Performance.SQL.Core/     netstandard2.0 — shared by both CMS v
   Rewriting/          SqlRewriteRegistry, RewriteContext, RewriteResult,
                       DatabaseCapabilities, SqlServerCapabilityProvider
   Diagnostics/        IRewriteObserver, RewriteEvent, CompositeRewriteObserver
+  Ado/                RewritingDbProviderFactory / Connection / Command / Transaction
 
-src/Optimizely.Performance.SQL.V12/      net6.0;net8.0 — CMS 12 adapter (csproj only so far)
+src/Optimizely.Performance.SQL.V11/      net472 — CMS 11 adapter
+  Patching/           SqlCommandPatcher, SqlCommandPatch
+  PerformanceSqlShim, PerformanceSqlStartup, AppSettingsOptions, ShimStatus
+
+src/Optimizely.Performance.SQL.V12/      net6.0;net8.0 — CMS 12 adapter
+  Diagnostics/        SqlClientDiagnosticSubscriber
+  PerformanceSqlShim, PerformanceSqlServiceCollectionExtensions, ShimStatus
 ```
+
+`Interception/` is the interception-agnostic middle: `CommandRewriter.Apply` takes any
+`DbCommand`, returns a `CommandRewrite` that knows how to undo itself, and neither knows nor
+cares whether a Harmony prefix or a diagnostic event called it. `RewriteHost` is the
+composition root both adapters share — neither assembles the pieces itself, because the
+pieces have to agree.
+
+`Ado/` is the original decorator route. It is retained and tested, and it is the right
+answer for a host that creates its own commands through a `DbProviderFactory`, but it is not
+how either CMS adapter works: EPiServer's hard casts to `SqlCommand` rule a decorator out.
 
 The core targets `netstandard2.0` so one assembly serves .NET Framework 4.7.2 (CMS 11) and
 .NET 6+ (CMS 12). It references neither `System.Data.SqlClient` nor
 `Microsoft.Data.SqlClient` — everything is reached through `System.Data.Common`, so the shim
-is not coupled to whichever SqlClient a given site resolves.
+is not coupled to whichever SqlClient a given site resolves. The V11 adapter's only
+dependency beyond the framework is `Lib.Harmony`.
+
+## Installing
+
+**CMS 11** — reference the package. `[assembly: PreApplicationStartMethod]` installs it, so
+there is nothing to call. Configure through `appSettings`:
+
+```xml
+<add key="optimizely:performance-sql:enabled" value="true" />
+<add key="optimizely:performance-sql:shadowMode" value="true" />
+<add key="optimizely:performance-sql:configurationPath" value="config/approved-sql.json" />
+```
+
+**CMS 12** — one line in `Program.cs`:
+
+```csharp
+builder.Services.AddOptimizelyPerformanceSql(options => options.ShadowMode = true);
+```
+
+Both install eagerly and both are idempotent; calling `Install()` again reloads
+configuration rather than installing twice.
 
 ## Building
 
@@ -216,6 +316,8 @@ dotnet test  Optimizely.Performance.SQL.slnx
 ```
 tests/Optimizely.Performance.SQL.Core.Tests/         210 tests, no database required
 tests/Optimizely.Performance.SQL.Integration.Tests/   35 tests, needs a SQL Server
+tests/Optimizely.Performance.SQL.V11.Tests/           26 tests, 15 need a SQL Server
+tests/Optimizely.Performance.SQL.V12.Tests/           28 tests, 16 need a SQL Server
 ```
 
 The unit suite drives the ADO.NET decorators over a fake provider that records what it was
@@ -229,26 +331,52 @@ same rewrite genuinely changing results on the case-sensitive one, and shows the
 standing down there. It also covers the procedure redirect end to end, including drift and
 a replacement that was never deployed.
 
-It targets a local default instance; override with `OPTIPERF_TEST_SQL`. With no server
-reachable the integration tests skip rather than fail.
+The two adapter suites install the real shim against a scratch database and ask the only
+question that matters: did the approved SQL reach the server? The approved statements are
+contrived so the two versions return *different* data — a `Source` column reading either
+`original` or `replacement` — because real rewrites are semantically identical and therefore
+useless for proving one actually ran. Every assertion reads a value the server produced.
+This is the miniature form of watching a profiler; it is not a substitute for doing so
+against a real site.
+
+Both adapters get the same battery, deliberately: `DbCommand`-typed callers, a hard cast to
+`SqlCommand`, async, `ExecuteScalar`, `ExecuteNonQuery`, transactions, procedure redirect,
+restore after success, restore after a *failed* execution, command reuse, and
+`Applied == Restored` with nothing left in flight. Two adapters reaching the command by
+completely unrelated means can only be shown to behave alike by asking them the same
+questions.
+
+`PatchTargetTests` and `DiagnosticContractTests` need no database and cover what a real
+provider cannot be made to do on demand: that the protected reader overrides are patched
+(the gap that would silently lose ~97 CMS 11 call sites), and that the subscriber survives a
+completion event that never arrives, a payload with no operation id, and disposal with work
+still in flight.
+
+The suites target a local default instance; override with `OPTIPERF_TEST_SQL`. With no
+server reachable the database-backed tests skip rather than fail.
 
 ## What is not here yet
 
 Being explicit, because the core reads more finished than the product is:
 
 - **No approved statements.** No `config/approved-sql.json`, no `approvals/` records, no
-  sync tool to project one into the other. The engine has nothing to run.
-- **No CMS 12 adapter code.** `Optimizely.Performance.SQL.V12` is a csproj and a comment
-  explaining the intended `DiagnosticListener` subscription. No source files.
-- **No CMS 11 adapter at all.** The likely hook is subclassing
-  `SqlServerDataStoreProvider`; not yet decided or written.
+  sync tool to project one into the other. The engine has nothing to run. This is the gap
+  that matters most: everything else is machinery waiting on a corpus.
+- **Neither adapter has run under a real Optimizely site.** The suites prove the mechanism
+  against a scratch database. They do not prove it against Foundation with a profiler
+  attached, which is the test that actually counts, and which needs the corpus first.
+- **CMS 11's patching is unproven outside a console host.** Three specific unknowns: whether
+  Harmony patches an NGEN'd `System.Data.dll` under IIS as cleanly as it does a JIT-compiled
+  one, whether DXP PaaS permits the dynamic-method emission Harmony needs, and how it
+  coexists with an APM agent patching the same methods. All three are answerable only on a
+  real host.
 - **No CI.** The suites exist and pass; nothing runs them on push.
 - **`SqlServerCapabilityProvider` matches indexes by name only.** It reads `sys.indexes`
   and compares names. A precondition that really wants "an index leading on these key
   columns with these includes" needs `sys.index_columns`, which is not wired up. Index
   preconditions are therefore weaker than they look.
-- **CMS 13 is out of scope.** Its content store is not SQL Server, so a
-  `DbProviderFactory`-based rewrite has nothing to attach to. It needs a separate strategy.
+- **CMS 13 is out of scope.** Its content store is not SQL Server, so there is nothing for a
+  SQL rewrite to attach to. It needs a separate strategy.
 
 ## License
 

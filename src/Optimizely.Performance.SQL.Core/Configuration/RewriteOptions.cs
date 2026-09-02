@@ -1,6 +1,4 @@
-using Optimizely.Performance.SQL.Configuration;
-
-namespace Optimizely.Performance.SQL
+namespace Optimizely.Performance.SQL.Configuration
 {
     /// <summary>
     /// Host-supplied switches controlling how the shim behaves at runtime.

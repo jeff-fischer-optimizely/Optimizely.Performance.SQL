@@ -1,9 +1,9 @@
 using System;
-using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
+using Optimizely.Performance.SQL.Interception;
 using Optimizely.Performance.SQL.Rewriting;
 
 namespace Optimizely.Performance.SQL.Ado
@@ -173,52 +173,16 @@ namespace Optimizely.Performance.SQL.Ado
 
         /// <summary>
         /// Resolves the statement and applies the substitution, returning a scope that
-        /// undoes it. A failure anywhere in here leaves the command untouched and the
-        /// original statement runs, which is the only acceptable failure mode for a shim
-        /// sitting in front of every query in the CMS.
+        /// undoes it.
         /// </summary>
-        private RewriteScope BeginRewrite()
+        /// <remarks>
+        /// The decision itself lives in <see cref="CommandRewriter"/> so this decorator
+        /// and the CMS 11 / CMS 12 adapters cannot disagree about what is safe to
+        /// substitute.
+        /// </remarks>
+        private CommandRewrite BeginRewrite()
         {
-            var commandType = _inner.CommandType;
-
-            if (_context.IsInert
-                || (commandType != CommandType.Text && commandType != CommandType.StoredProcedure))
-            {
-                return RewriteScope.None;
-            }
-
-            // Procedure redirects are rare and are configured per deployment. Skip the
-            // probe entirely when none are loaded, so a sproc-heavy stack such as CMS 11
-            // pays nothing for the feature being present.
-            if (commandType == CommandType.StoredProcedure && !_context.Registry.HasProcedureRedirects)
-            {
-                return RewriteScope.None;
-            }
-
-            try
-            {
-                // The transaction goes with the connection: a probe issued outside the
-                // caller's pending transaction is rejected by the provider.
-                var capabilities = _context.Options.ProbeDatabaseCapabilities
-                    ? _context.CapabilityProvider.GetCapabilities(_inner.Connection, _inner.Transaction)
-                    : DatabaseCapabilities.Unknown;
-
-                var result = commandType == CommandType.StoredProcedure
-                    ? _context.Registry.ResolveProcedure(_inner.CommandText, capabilities)
-                    : _context.Registry.Resolve(_inner.CommandText, _inner.Parameters, capabilities);
-
-                if (!result.ShouldReplace)
-                {
-                    return RewriteScope.None;
-                }
-
-                return RewriteScope.Apply(_inner, result);
-            }
-            catch
-            {
-                // Fail open: an unrewritten query is slow, a failed query is an outage.
-                return RewriteScope.None;
-            }
+            return CommandRewriter.Apply(_inner, _context);
         }
 
         protected override void Dispose(bool disposing)
@@ -229,114 +193,6 @@ namespace Optimizely.Performance.SQL.Ado
             }
 
             base.Dispose(disposing);
-        }
-
-        /// <summary>
-        /// Applies a substitution for the duration of one execution and reverses it on
-        /// dispose, including any parameters the variant made redundant.
-        /// </summary>
-        private readonly struct RewriteScope : IDisposable
-        {
-            public static readonly RewriteScope None = default;
-
-            private readonly DbCommand _command;
-            private readonly string _originalText;
-            private readonly List<KeyValuePair<int, DbParameter>> _removed;
-
-            private RewriteScope(
-                DbCommand command,
-                string originalText,
-                List<KeyValuePair<int, DbParameter>> removed)
-            {
-                _command = command;
-                _originalText = originalText;
-                _removed = removed;
-            }
-
-            public static RewriteScope Apply(DbCommand command, RewriteResult result)
-            {
-                var originalText = command.CommandText;
-                var removed = RemoveDroppedParameters(command, result.DroppedParameters);
-
-                command.CommandText = result.Sql;
-
-                return new RewriteScope(command, originalText, removed);
-            }
-
-            /// <summary>
-            /// Strips parameters the replacement no longer references, keeping the
-            /// <c>sp_executesql</c> signature aligned with the batch actually being run.
-            /// </summary>
-            private static List<KeyValuePair<int, DbParameter>> RemoveDroppedParameters(
-                DbCommand command,
-                string[] dropped)
-            {
-                if (dropped == null || dropped.Length == 0 || command.Parameters.Count == 0)
-                {
-                    return null;
-                }
-
-                List<KeyValuePair<int, DbParameter>> removed = null;
-
-                foreach (var name in dropped)
-                {
-                    for (var i = command.Parameters.Count - 1; i >= 0; i--)
-                    {
-                        var parameter = command.Parameters[i];
-
-                        if (parameter == null || !NameMatches(parameter.ParameterName, name))
-                        {
-                            continue;
-                        }
-
-                        removed ??= new List<KeyValuePair<int, DbParameter>>();
-                        removed.Add(new KeyValuePair<int, DbParameter>(i, parameter));
-                        command.Parameters.RemoveAt(i);
-                    }
-                }
-
-                return removed;
-            }
-
-            private static bool NameMatches(string actual, string expected)
-            {
-                return string.Equals(Strip(actual), Strip(expected), StringComparison.OrdinalIgnoreCase);
-            }
-
-            private static string Strip(string name)
-            {
-                if (string.IsNullOrEmpty(name))
-                {
-                    return string.Empty;
-                }
-
-                var first = name[0];
-                return first == '@' || first == ':' || first == '?' ? name.Substring(1) : name;
-            }
-
-            public void Dispose()
-            {
-                if (_command == null)
-                {
-                    return;
-                }
-
-                _command.CommandText = _originalText;
-
-                if (_removed == null)
-                {
-                    return;
-                }
-
-                // Re-insert ascending by original index so every parameter lands back
-                // where it started.
-                for (var i = _removed.Count - 1; i >= 0; i--)
-                {
-                    var entry = _removed[i];
-                    var index = Math.Min(entry.Key, _command.Parameters.Count);
-                    _command.Parameters.Insert(index, entry.Value);
-                }
-            }
         }
     }
 }

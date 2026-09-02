@@ -14,6 +14,16 @@
 
   <ItemGroup>
     <!--
+      So the tests can drive the subscriber with a synthetic diagnostic listener, and
+      assert the payload contract without needing a database.
+    -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Optimizely.Performance.SQL.V12.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
       Deliberately no Microsoft.Data.SqlClient reference. The diagnostic payload's
       Command is reached as System.Data.Common.DbCommand, so this adapter is not
       coupled to any particular SqlClient version the site happens to resolve.

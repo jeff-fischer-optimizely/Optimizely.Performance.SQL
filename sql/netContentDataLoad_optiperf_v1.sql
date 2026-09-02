@@ -1,8 +1,11 @@
 /*
     dbo.netContentDataLoad_optiperf_v1        OPT-0004        risk: Low
 
-    Derived from EPiServer.Cms.Core 12.24.1 / 11.21.5 (the two ship an identical body for
-    this procedure).
+    Derived from EPiServer.Cms.Core 12.24.1.
+
+    The CMS 11 body differs by six lines, all in the property load, so it gets its own copy
+    and its own hash: see netContentDataLoad_cms11_optiperf_v1.sql (OPT-0012). The prologue
+    this rewrite touches is character for character identical between the two.
 
     WHAT CHANGED
     ------------

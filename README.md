@@ -32,7 +32,9 @@ be shown to satisfy the conditions the rewrite was approved under.
 These are not preferences; they are the shape of the problem.
 
 **Approval happens outside the code.** The review process is a markdown record under
-`approvals/`, projected into `config/approved-sql.json` by a sync tool. Nothing that
+[`approvals/`](approvals/README.md); `config/approved-sql.json` names the record that
+authorised each entry in its `approvalDocument` field. The two are currently kept in step
+by hand — there is no sync tool, and nothing verifies that the path resolves. Nothing that
 ships in the assembly is unapproved, so there is no approval state to evaluate at runtime
 and no code path that could execute an unapproved statement. `ApprovedStatement` carries
 `ApprovedBy` / `ApprovedOn` / `ApprovalDocument` purely as provenance — support can trace a
@@ -359,12 +361,19 @@ server reachable the database-backed tests skip rather than fail.
 
 Being explicit, because the core reads more finished than the product is:
 
-- **No approved statements.** No `config/approved-sql.json`, no `approvals/` records, no
-  sync tool to project one into the other. The engine has nothing to run. This is the gap
-  that matters most: everything else is machinery waiting on a corpus.
-- **Neither adapter has run under a real Optimizely site.** The suites prove the mechanism
-  against a scratch database. They do not prove it against Foundation with a profiler
-  attached, which is the test that actually counts, and which needs the corpus first.
+- **Nothing has been field-verified.** The catalogue exists — 14 entries in
+  `config/approved-sql.json`, 15 scripts in [`sql/`](sql/README.md), review records in
+  [`approvals/`](approvals/README.md) — and neither adapter has run under a real Optimizely
+  site. The suites prove the mechanism against a scratch database. They do not prove it
+  against Foundation with a profiler attached, which is the test that actually counts. Until
+  then every entry is approved to *test*, not approved to *ship*.
+- **Two of the three largest entries are disarmed.** OPT-0001 and OPT-0002 carry
+  `enabled: false`, pending shadow-mode measurement and a per-database scope-name check
+  respectively. That leaves about 11% of the costed-query corpus armed — plus the CMS 11
+  share of `netContentListPaged`, which the corpus cannot separate out — against a catalogue
+  that covers 34%. See [docs/query-triage.md](docs/query-triage.md).
+- **No sync tool.** `approvals/` and `config/approved-sql.json` are kept in step by hand.
+  A stale `approvalDocument` path would not be caught by anything.
 - **CMS 11's patching is unproven outside a console host.** Three specific unknowns: whether
   Harmony patches an NGEN'd `System.Data.dll` under IIS as cleanly as it does a JIT-compiled
   one, whether DXP PaaS permits the dynamic-method emission Harmony needs, and how it

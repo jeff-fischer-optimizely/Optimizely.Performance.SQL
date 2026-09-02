@@ -8,7 +8,7 @@
     -----------
     This is the batch content loader, and it is the second largest single item in the
     surveyed estate: present in 185 databases, and the survey attributes around a tenth of
-    all fleet logical reads to it across twelve distinct statements.
+    the costed-query corpus, by logical reads, to it across twelve distinct statements.
 
     Every one of those statements joins @ContentItems, a table variable. Before
     compatibility level 150 a table variable is estimated at one row, whatever it actually

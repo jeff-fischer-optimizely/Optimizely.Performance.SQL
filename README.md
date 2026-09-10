@@ -372,6 +372,14 @@ Being explicit, because the core reads more finished than the product is:
   respectively. That leaves about 11% of the costed-query corpus armed — plus the CMS 11
   share of `netContentListPaged`, which the corpus cannot separate out — against a catalogue
   that covers 34%. See [docs/query-triage.md](docs/query-triage.md).
+- **The best available fix is a database setting this repository cannot apply.** 55.9% of
+  the production fleet runs below compatibility level 150, and raising it fixes the largest
+  cost class outright — including the third of the corpus no catalogue entry can reach. Nine
+  of the fourteen entries exist only because that raise has not happened. The procedure, the
+  eligibility query and the verification query are in
+  [docs/compatibility-level-remediation.md](docs/compatibility-level-remediation.md) and
+  [`sql/ops/`](sql/ops/); running them is a database-owner action, and none of it has been
+  run yet.
 - **No sync tool.** `approvals/` and `config/approved-sql.json` are kept in step by hand.
   A stale `approvalDocument` path would not be caught by anything.
 - **CMS 11's patching is unproven outside a console host.** Three specific unknowns: whether

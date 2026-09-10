@@ -1,7 +1,11 @@
 # Replacement procedures
 
-Every file here creates a **new** database object. Nothing in this directory alters,
+Every file in *this* directory creates a **new** database object. Nothing here alters,
 drops or replaces an object that Optimizely ships.
+
+[`ops/`](ops/) is the exception to the shape rather than to the rule: two read-only
+operational queries that create nothing at all, supporting
+[docs/compatibility-level-remediation.md](../docs/compatibility-level-remediation.md).
 
 That is the whole design. Optimizely owns `dbo.netContentDataLoad`; a CMS upgrade will
 rewrite it without asking, and a support engineer looking at a misbehaving site has to be

@@ -270,8 +270,10 @@ shape — and in the databases where a level raise is blocked.
 
 The fleet survey sizes the raise in two tranches (levels 120–140 can take it directly;
 100–110 need `LEGACY_CARDINALITY_ESTIMATION = ON` alongside, to avoid taking the cardinality
-estimator swap at the same time). Details are in the survey documents outside this
-repository.
+estimator swap at the same time). The step-by-step procedure, the per-database eligibility
+query and the post-change verification query are in
+[docs/compatibility-level-remediation.md](compatibility-level-remediation.md). The costing
+behind the tranches is in the survey documents outside this repository.
 
 ## Method
 
